@@ -16,7 +16,7 @@ YAML設定ファイル駆動で、各フェーズの単独実行とパイプラ�
 ## セットアップ
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 # 任意（Optuna/SHAP/LightGBM/TabPFN など）
@@ -58,4 +58,3 @@ cp clearml.conf.example clearml.conf
 - `config_preprocessing.yaml` / `config_training.yaml` / `config_comparison.yaml`（フェーズ別設定）
 - `config_dataregit.yaml` / `config_editing.yaml`（データ登録/編集の個別実行）
 - `inference_config.yaml`（推論フェーズ）
-

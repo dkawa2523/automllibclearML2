@@ -46,7 +46,7 @@ automl_lib/
 ### 2.1 Python / venv
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 # 任意（Optuna/SHAP/LightGBM/TabPFN など）

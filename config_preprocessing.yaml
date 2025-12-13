@@ -1,0 +1,33 @@
+# Configuration for preprocessing phase only
+data:
+  # ClearML Dataset ID から読み込む（既存Dataset）
+  dataset_id: "20f90f6817834c609dcb35be5cadf17c"
+  # フォールバック用ローカルCSV（任意）
+  csv_path: "data/example.csv"
+  target_column: purchase_amount
+  feature_columns: null
+  problem_type: null
+  test_size: 0.0
+  random_seed: 42
+
+preprocessing:
+  numeric_imputation: ['mean']
+  categorical_imputation: ['most_frequent']
+  scaling: ['standard']
+  categorical_encoding: ['onehot']
+  polynomial_degree: false
+  target_standardize: true
+
+output:
+  output_dir: "outputs/preprocessing"
+
+clearml:
+  enabled: true
+  project_name: "AutoML-with-ClearML"
+  dataset_project: "AutoML-datasets"
+  base_output_uri: null
+  queue: "default"
+  tags: ["automl", "preprocessing"]
+  enable_preprocessing: true
+  preprocessed_dataset_id: null
+

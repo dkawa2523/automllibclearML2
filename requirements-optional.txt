@@ -1,0 +1,18 @@
+# Optional dependencies (install as needed).
+
+# Bayesian optimization
+optuna>=3.0
+
+# Model interpretation
+shap>=0.44
+
+# Gradient boosting libraries
+lightgbm>=4.0
+xgboost>=2.0
+catboost>=1.2
+
+# Deep tabular models (optional; may require additional system setup)
+torch>=2.0
+pytorch-tabnet>=4.1
+tabpfn>=0.1
+

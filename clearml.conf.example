@@ -1,0 +1,20 @@
+api {
+  # Example ClearML configuration file (DO NOT COMMIT clearml.conf with real credentials).
+  #
+  # Usage:
+  #   1) Copy this file:  cp clearml.conf.example clearml.conf
+  #   2) Fill in your server URLs and credentials.
+  #   3) Run the CLI commands (ClearML will pick up clearml.conf from repo root).
+  #
+  # If you prefer using a global config, place it at ~/.clearml.conf and/or
+  # set CLEARML_CONFIG_FILE=/path/to/clearml.conf
+  web_server: "https://app.clear.ml"
+  api_server: "https://api.clear.ml"
+  files_server: "https://files.clear.ml"
+
+  credentials {
+    access_key: ""
+    secret_key: ""
+  }
+}
+

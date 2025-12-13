@@ -1,0 +1,27 @@
+# Configuration for data editing phase only
+data:
+  csv_path: "data/example.csv"
+  target_column: purchase_amount
+  feature_columns: null
+  problem_type: null
+  test_size: 0.0
+  random_seed: 42
+
+editing:
+  enable: true
+  output_path: "outputs/data_editing/edited.csv"
+  drop_columns: []
+  rename_columns: {}
+  fillna: null
+  fillna_columns: {}
+  query: null
+  clip_values: {}
+
+clearml:
+  enabled: true
+  project_name: "AutoML-with-ClearML"
+  dataset_project: "AutoML-datasets"
+  raw_dataset_id: null
+  edited_dataset_id: null
+  queue: "default"
+  tags: ["automl", "data_editing"]

@@ -1,0 +1,86 @@
+# Training-only configuration (used by `automl_lib.cli.run_training`)
+
+data:
+  # ClearML Dataset ID から読み込む（推奨）
+  dataset_id: "20f90f6817834c609dcb35be5cadf17c"
+  # フォールバック用ローカルCSV（任意）
+  csv_path: "data/example.csv"
+  target_column: purchase_amount
+  feature_columns: null
+  problem_type: null
+  test_size: 0.0
+  random_seed: 42
+
+preprocessing:
+  numeric_imputation: ["mean"]
+  categorical_imputation: ["most_frequent"]
+  scaling: ["standard"]
+  categorical_encoding: ["onehot"]
+  polynomial_degree: false
+  target_standardize: true
+
+models:
+  - name: LinearRegression
+    params: {}
+  - name: Ridge
+    params:
+      alpha: [0.1, 1.0]
+  - name: RandomForest
+    params:
+      n_estimators: [50]
+      max_depth: [null]
+
+ensembles:
+  stacking:
+    enable: false
+    estimators: []
+    final_estimator: null
+  voting:
+    enable: false
+    estimators: []
+    voting: "hard"
+
+cross_validation:
+  n_folds: 5
+  shuffle: true
+  random_seed: 42
+
+output:
+  output_dir: "outputs/train"
+  save_models: true
+  generate_plots: true
+  results_csv: "results_summary.csv"
+
+evaluation:
+  regression_metrics: ["mae", "rmse", "r2"]
+  classification_metrics: ["accuracy", "f1_macro", "roc_auc_ovr"]
+  primary_metric: null
+
+optimization:
+  method: "grid"
+  n_iter: 100
+
+interpretation:
+  compute_feature_importance: true
+  compute_shap: true
+
+visualizations:
+  predicted_vs_actual: true
+  residual_scatter: false
+  residual_hist: false
+  feature_importance: false
+  shap_summary: false
+  comparative_heatmap: false
+
+clearml:
+  enabled: true
+  project_name: "AutoML-with-ClearML"
+  dataset_project: "AutoML-datasets"
+  base_output_uri: null
+  queue: "default"
+  tags: ["automl", "training"]
+  enable_training: true
+  # training 単独実行では pipeline/comparison は別CLI推奨
+  enable_pipeline: false
+  enable_comparison: false
+  run_tasks_locally: true

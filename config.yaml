@@ -1,0 +1,183 @@
+## Example configuration for the custom AutoML library.
+## Users can modify this file to control how the pipeline behaves.
+
+# -----------------------------------------------------------------------------
+# DATA SETTINGS
+# -----------------------------------------------------------------------------
+data:
+  # ClearML Dataset ID から読み込む
+  dataset_id: "20f90f6817834c609dcb35be5cadf17c"
+  # フォールバック用ローカルCSV（パイプライン失敗時に備えて残す）
+  csv_path: "data/example.csv"
+  target_column: purchase_amount
+  feature_columns: null
+  problem_type: null
+  test_size: 0.0
+  random_seed: 42
+
+# -----------------------------------------------------------------------------
+# PREPROCESSING SETTINGS
+# -----------------------------------------------------------------------------
+preprocessing:
+  # Strategies for imputing missing numeric values. Allowed values are
+  # 'mean', 'median', 'most_frequent' and null (no imputation). Multiple
+  # strategies can be specified; each one will be evaluated.
+  numeric_imputation: ['mean']
+
+  # Strategies for imputing missing categorical values. Allowed values are
+  # 'most_frequent' and null (no imputation).
+  categorical_imputation: ['most_frequent']
+
+  # List of scaling strategies to apply to numeric features. Supported
+  # strings: 'standard' (StandardScaler), 'minmax' (MinMaxScaler),
+  # 'robust' (RobustScaler) or null to skip scaling. Each option will
+  # generate a separate preprocessing pipeline.
+  scaling: ['standard']
+
+  # List of encoding strategies for categorical features. Supported
+  # values: 'onehot' (OneHotEncoder), 'ordinal' (OrdinalEncoder), or
+  # null to leave categorical variables untouched. When null is used,
+  # models that cannot handle categorical features natively will throw
+  # an error unless the dataset contains no categorical variables.
+  categorical_encoding: ['onehot']
+
+  # Polynomial feature generation. Provide an integer degree (e.g. 2) to
+  # include polynomial features up to that degree or set to false to
+  # disable polynomial expansion.
+  polynomial_degree: false
+
+  # Whether to standardize the target variable (regression only) using
+  # StandardScaler before model training. Predictions will be inverse-
+  # transformed back to the original scale.
+  target_standardize: true
+
+# -----------------------------------------------------------------------------
+# MODEL SETTINGS
+# -----------------------------------------------------------------------------
+models:
+  # Simplified model list for quick local run
+  - name: LinearRegression
+    params: {}
+
+  - name: Ridge
+    params:
+      alpha: [0.1, 1.0]
+
+  - name: RandomForest
+    params:
+      n_estimators: [50]
+      max_depth: [null]
+
+# -----------------------------------------------------------------------------
+# ENSEMBLE SETTINGS
+# -----------------------------------------------------------------------------
+ensembles:
+  stacking:
+    enable: false
+    estimators: []
+    final_estimator: null
+
+  voting:
+    enable: false
+    estimators: []
+    voting: 'hard'
+
+# -----------------------------------------------------------------------------
+# CROSS‑VALIDATION SETTINGS
+# -----------------------------------------------------------------------------
+cross_validation:
+  # Number of folds for k‑fold cross validation. Use a value equal to the number
+  # of samples to perform leave‑one‑out cross‑validation. When set to null, the
+  # code will choose min(5, n_samples) folds.
+  n_folds: 5
+
+  # Whether to shuffle the data before splitting into folds. Note that
+  # LeaveOneOut cross‑validation does not allow shuffling.
+  shuffle: true
+
+  # Random seed for fold shuffling.
+  random_seed: 42
+
+# -----------------------------------------------------------------------------
+# OUTPUT SETTINGS
+# -----------------------------------------------------------------------------
+output:
+  # Directory into which trained models, logs, evaluation results and plots
+  # will be saved. Relative paths are allowed.
+  output_dir: "outputs/train"
+
+  # Whether to save trained models to disk.
+  save_models: true
+
+  # Whether to generate visualizations. If false, plots will not be created.
+  generate_plots: true
+
+  # File name for the summary CSV containing cross‑validation results for all
+  # (preprocessor, model, parameter) combinations.
+  results_csv: "results_summary.csv"
+
+# -----------------------------------------------------------------------------
+# EVALUATION SETTINGS
+# -----------------------------------------------------------------------------
+evaluation:
+  # Metrics for regression tasks. Choose any subset of ['mae','rmse','r2'].
+  regression_metrics: ['mae', 'rmse', 'r2']
+  # Metrics for classification tasks. Choose any subset of
+  # ['accuracy','precision_macro','recall_macro','f1_macro','roc_auc_ovr'].
+  classification_metrics: ['accuracy', 'f1_macro', 'roc_auc_ovr']
+  # Primary metric used to pick the best model. If null, defaults to 'r2'
+  # for regression and 'accuracy' for classification.
+  primary_metric: null
+
+# -----------------------------------------------------------------------------
+# HYPERPARAMETER OPTIMIZATION SETTINGS
+# -----------------------------------------------------------------------------
+optimization:
+  # Choose 'grid', 'random' or 'bayesian' (requires Optuna).
+  method: 'grid'
+  # Number of iterations for random or bayesian search. Ignored for grid.
+  n_iter: 100
+
+# -----------------------------------------------------------------------------
+# INTERPRETATION SETTINGS
+# -----------------------------------------------------------------------------
+interpretation:
+  # Whether to compute feature importance for models that support it (e.g.,
+  # tree-based models). Plots will be saved if enabled.
+  compute_feature_importance: true
+  # Whether to compute SHAP values for supported models. Requires the
+  # 'shap' library. Plots will be saved if enabled and the library is
+  # available.
+  compute_shap: true
+
+# -----------------------------------------------------------------------------
+# CLEARML SETTINGS (OPTIONAL)
+# -----------------------------------------------------------------------------
+clearml:
+  enabled: true
+  project_name: "AutoML-with-ClearML"
+  dataset_project: "AutoML-datasets"
+  base_output_uri: null
+  # Default execution queue for tasks (steps use agents.* if set)
+  queue: "default"
+  # Service/Controller queue to avoid controllerタスクの重複・停止
+  services_queue: "services"
+  tags: ["automl", "demo"]
+  preprocessed_dataset_id: null
+  enable_preprocessing: true
+  enable_training: true
+  enable_inference: false
+  enable_optimization: false
+  enable_pipeline: true
+  enable_comparison: true
+  comparison_agent: null
+  comparison_metrics: ["r2", "rmse", "mae"]
+  # エージェントが無い環境でも失敗しないようローカル実行を優先
+  run_tasks_locally: true
+  run_pipeline_locally: true
+  agents:
+    preprocessing: null
+    training: null
+    inference: null
+    optimization: null
+    pipeline: null

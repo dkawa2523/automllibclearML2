@@ -1,6 +1,6 @@
-"""Plugin entrypoints for automl_lib.
+"""Project-specific extension modules (optional).
 
-Users can list modules under `preprocessing.plugins` / `evaluation.plugins`
-to register custom preprocessors/metrics without modifying core code.
+Place your custom model/metric/preprocessor registrations here and reference them from config
+via plugin/module import lists (e.g. evaluation.plugins).
 """
 

@@ -72,6 +72,7 @@ def load_preprocessing_config(path: Path) -> PreprocessingConfig:
     raw = load_yaml(path)
     output = _extract_output_dir(raw) if not _looks_like_training_config(raw) else {}
     slim: Dict[str, Any] = {
+        "run": raw.get("run") or {},
         "data": raw.get("data") or {},
         "preprocessing": raw.get("preprocessing") or {},
         "output": output,
@@ -93,6 +94,7 @@ def load_comparison_config(path: Path) -> ComparisonConfig:
     if ranking is None:
         ranking = {}
     slim: Dict[str, Any] = {
+        "run": raw.get("run") or {},
         "output": output,
         "clearml": raw.get("clearml"),
         "ranking": ranking,

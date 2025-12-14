@@ -3,7 +3,7 @@ import argparse
 
 from automl_lib.phases import run_data_editing
 from automl_lib.config.loaders import load_data_editing_config
-from automl_lib.cli.common import clearml_avoid_task_reuse, load_json_or_yaml, print_and_write_json
+from automl_lib.cli.common import clearml_avoid_task_reuse, load_json_or_yaml, maybe_clone_from_config, print_and_write_json
 
 
 def main() -> None:
@@ -17,7 +17,9 @@ def main() -> None:
         help="Optional path to write resulting dataset/task info as JSON.",
     )
     args = parser.parse_args()
-    load_data_editing_config(args.config)
+    cfg = load_data_editing_config(args.config)
+    if maybe_clone_from_config(cfg, phase="data_editing", output_info=args.output_info):
+        return
     clearml_avoid_task_reuse()
     input_info = load_json_or_yaml(args.input_info)
     result = run_data_editing(args.config, input_info=input_info)

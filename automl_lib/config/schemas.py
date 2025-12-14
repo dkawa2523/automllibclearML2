@@ -32,6 +32,19 @@ class ClearMLAgentsConfig(_StrictBaseModel):
     comparison: Optional[str] = None
 
 
+class RunSettings(_StrictBaseModel):
+    id: Optional[str] = Field(default=None, validation_alias=AliasChoices("id", "run_id", "runId"))
+    user: Optional[str] = None
+    dataset_key: Optional[str] = None
+
+
+class ClearMLNamingConfig(_StrictBaseModel):
+    # "root": use clearml.project_name as-is
+    # "user_dataset": use "<project>/<user>/<dataset_key>"
+    project_mode: Literal["root", "user_dataset"] = "root"
+    train_models_suffix: str = "train_models"
+
+
 class ClearMLSettings(_StrictBaseModel):
     enabled: bool = False
     project_name: Optional[str] = None
@@ -43,6 +56,10 @@ class ClearMLSettings(_StrictBaseModel):
     run_tasks_locally: bool = Field(default=True, validation_alias=AliasChoices("run_tasks_locally", "run_locally"))
     run_pipeline_locally: bool = True
     tags: List[str] = Field(default_factory=list)
+    naming: ClearMLNamingConfig = Field(default_factory=ClearMLNamingConfig)
+    # Clone execution mode (Phase 3). When "clone", callers may clone template_task_id instead of creating a new task.
+    execution_mode: Literal["new", "clone"] = "new"
+    template_task_id: Optional[str] = None
 
     raw_dataset_id: Optional[str] = None
     edited_dataset_id: Optional[str] = None
@@ -478,6 +495,7 @@ class VisualizationConfig(_StrictBaseModel):
 
 
 class TrainingConfig(_StrictBaseModel):
+    run: RunSettings = Field(default_factory=RunSettings)
     data: DataSettings
     preprocessing: PreprocessSettings = Field(default_factory=PreprocessSettings)
     models: List[ModelSpec] = Field(default_factory=list)
@@ -574,6 +592,7 @@ class TrainingConfig(_StrictBaseModel):
 
 
 class PreprocessingConfig(_StrictBaseModel):
+    run: RunSettings = Field(default_factory=RunSettings)
     data: DataSettings
     preprocessing: PreprocessSettings = Field(default_factory=PreprocessSettings)
     output: PreprocessingOutputSettings = Field(default_factory=PreprocessingOutputSettings)
@@ -586,6 +605,7 @@ class PreprocessingConfig(_StrictBaseModel):
 
 
 class ComparisonConfig(_StrictBaseModel):
+    run: RunSettings = Field(default_factory=RunSettings)
     output: ComparisonOutputSettings = Field(default_factory=ComparisonOutputSettings)
     clearml: Optional[ClearMLSettings] = None
     ranking: ComparisonRankingSettings = Field(default_factory=ComparisonRankingSettings)
@@ -639,6 +659,7 @@ class InferenceSearchConfig(_StrictBaseModel):
 
 
 class InferenceConfig(_StrictBaseModel):
+    run: RunSettings = Field(default_factory=RunSettings)
     model_dir: str
     models: List[InferenceModelSpec] = Field(default_factory=list)
     clearml: Optional[ClearMLSettings] = None
@@ -656,6 +677,7 @@ class InferenceConfig(_StrictBaseModel):
 
 
 class DataRegistrationConfig(_StrictBaseModel):
+    run: RunSettings = Field(default_factory=RunSettings)
     data: DataSettings
     clearml: Optional[ClearMLSettings] = None
 
@@ -667,6 +689,7 @@ class DataRegistrationConfig(_StrictBaseModel):
 
 
 class DataEditingConfig(_StrictBaseModel):
+    run: RunSettings = Field(default_factory=RunSettings)
     data: DataSettings
     editing: EditingSettings
     clearml: Optional[ClearMLSettings] = None

@@ -25,6 +25,7 @@ import argparse
 import json
 import os
 import sys
+import time
 import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -49,11 +50,28 @@ import numpy as np
 from joblib import dump
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.pipeline import Pipeline
-from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+from sklearn.metrics import (
+    accuracy_score,
+    f1_score,
+    mean_absolute_error,
+    mean_squared_error,
+    precision_score,
+    r2_score,
+    recall_score,
+    roc_auc_score,
+)
 from sklearn.compose import TransformedTargetRegressor
 from sklearn.preprocessing import StandardScaler
 
 from automl_lib.clearml.bootstrap import ensure_clearml_config_file
+from automl_lib.clearml.context import (
+    build_run_context,
+    get_run_id_env,
+    resolve_dataset_key,
+    resolve_run_id,
+    set_run_id_env,
+)
+from automl_lib.clearml.naming import build_project_path, build_tags, task_name
 from automl_lib.config.loaders import load_training_config
 from automl_lib.config.schemas import TrainingConfig
 from automl_lib.preprocessing.preprocessors import generate_preprocessors
@@ -67,6 +85,12 @@ from .interpretation import extract_feature_importance, plot_feature_importance,
 from .model_factory import ModelInstance, prepare_tabpfn_params
 from .search import generate_param_combinations
 from .tabpfn_utils import OfflineTabPFNRegressor
+from .reporting import (
+    build_plot_artifacts_table,
+    report_metric_scalars,
+    save_confusion_matrices,
+    save_roc_pr_curves,
+)
 from .visualization import (
     plot_bar_comparison,
     plot_predicted_vs_actual,
@@ -284,16 +308,9 @@ def run_automl(config_path: Path) -> None:
         cfg = load_training_config(config_path)
     except Exception as exc:
         raise ValueError(f"Invalid training config: {exc}") from exc
+    run_id = resolve_run_id(from_config=getattr(cfg.run, "id", None), from_env=get_run_id_env())
+    set_run_id_env(run_id)
     training_task_ids: List[str] = []
-    parent_project = cfg.clearml.project_name if cfg.clearml else None
-    clearml_mgr = ClearMLManager(
-        cfg.clearml,
-        task_name=cfg.clearml.task_name if cfg.clearml and cfg.clearml.task_name else "training-summary",
-        task_type="training",
-        default_project=cfg.clearml.project_name if cfg.clearml and cfg.clearml.project_name else "AutoML",
-    )
-    # derive train_models project under the same parent
-    train_models_project = f"{parent_project}/train_models" if parent_project else f"train_models"
     raw_dataset_id = cfg.clearml.raw_dataset_id if cfg.clearml else None
     preprocessed_dataset_id = cfg.clearml.preprocessed_dataset_id if cfg.clearml else None
     env_raw = os.environ.get("AUTO_ML_RAW_DATASET_ID")
@@ -317,6 +334,39 @@ def run_automl(config_path: Path) -> None:
         csv_override = find_first_csv(local_copy) if local_copy else None
         if csv_override:
             cfg.data.csv_path = str(csv_override)
+
+    dataset_key = resolve_dataset_key(
+        explicit=getattr(cfg.run, "dataset_key", None),
+        dataset_id=str(dataset_id_for_load) if dataset_id_for_load else None,
+        csv_path=getattr(cfg.data, "csv_path", None),
+    )
+    ctx = build_run_context(
+        run_id=run_id,
+        dataset_key=dataset_key,
+        project_root=(cfg.clearml.project_name if cfg.clearml else None),
+        dataset_project=(cfg.clearml.dataset_project if cfg.clearml else None),
+        user=getattr(cfg.run, "user", None),
+    )
+    naming_cfg = getattr(cfg.clearml, "naming", None) if cfg.clearml else None
+    project_mode = getattr(naming_cfg, "project_mode", "root")
+    train_suffix = getattr(naming_cfg, "train_models_suffix", "train_models")
+    project_for_summary = build_project_path(ctx, project_mode=project_mode)
+    train_models_project = build_project_path(ctx, project_mode=project_mode, suffix=train_suffix)
+
+    base_summary_name = cfg.clearml.task_name if cfg.clearml and cfg.clearml.task_name else None
+    summary_task_name = (
+        f"{base_summary_name} [{ctx.dataset_key}] [{ctx.run_id}]"
+        if base_summary_name
+        else task_name("training_summary", ctx)
+    )
+    clearml_mgr = ClearMLManager(
+        cfg.clearml,
+        task_name=summary_task_name,
+        task_type="training",
+        default_project=project_for_summary,
+        project=project_for_summary,
+        extra_tags=build_tags(ctx, phase="training"),
+    )
 
     # Load data
     X, y = load_dataset(cfg.data)
@@ -380,7 +430,37 @@ def run_automl(config_path: Path) -> None:
                 "enabled": getattr(spec, "enable", True),
                 "class": class_path,
                 "params": getattr(spec, "params", {}),
-            }
+        }
+        cfg_dump = cfg.model_dump()
+        try:
+            cfg_dump.setdefault("run", {})
+            cfg_dump["run"]["id"] = run_id
+            cfg_dump["run"]["dataset_key"] = dataset_key
+        except Exception:
+            pass
+        try:
+            cfg_dump.setdefault("data", {})
+            if dataset_id_for_load:
+                cfg_dump["data"]["dataset_id"] = str(dataset_id_for_load)
+            if getattr(cfg.data, "csv_path", None):
+                cfg_dump["data"]["csv_path"] = str(cfg.data.csv_path)
+        except Exception:
+            pass
+        sections = {
+            "Run": cfg_dump.get("run") or {},
+            "Data": cfg_dump.get("data") or {},
+            "Preprocessing": cfg_dump.get("preprocessing") or {},
+            "ModelCandidates": {"models": cfg_dump.get("models") or [], "ensembles": cfg_dump.get("ensembles") or {}},
+            "CrossValidation": cfg_dump.get("cross_validation") or {},
+            "Evaluation": cfg_dump.get("evaluation") or {},
+            "Optimization": cfg_dump.get("optimization") or {},
+            "Interpretation": cfg_dump.get("interpretation") or {},
+            "Visualizations": cfg_dump.get("visualizations") or {},
+            "Output": cfg_dump.get("output") or {},
+            "ClearML": cfg_dump.get("clearml") or {},
+        }
+        clearml_mgr.connect_params_sections(sections)
+        # Extra curated context (kept for backward compatibility / visibility).
         clearml_mgr.connect_params(config_params)
     except Exception:
         pass
@@ -895,6 +975,9 @@ def run_automl(config_path: Path) -> None:
     visual_interp_dir = output_dir / "interpolation_space"
     visual_fi_dir = output_dir / "feature_importances_models"
     visual_shap_dir = output_dir / "shap_summaries_models"
+    visual_confusion_dir = output_dir / "confusion_matrices"
+    visual_roc_dir = output_dir / "roc_curves"
+    visual_pr_dir = output_dir / "pr_curves"
     # Create only if enabled and regression
     if problem_type == "regression" and cfg.output.generate_plots and cfg.visualizations.predicted_vs_actual:
         visual_pred_dir.mkdir(exist_ok=True)
@@ -904,6 +987,10 @@ def run_automl(config_path: Path) -> None:
         visual_resid_hist_dir.mkdir(exist_ok=True)
     visual_metric_hist_dir.mkdir(exist_ok=True)
     visual_interp_dir.mkdir(exist_ok=True)
+    if problem_type == "classification" and cfg.output.generate_plots:
+        visual_confusion_dir.mkdir(exist_ok=True)
+        visual_roc_dir.mkdir(exist_ok=True)
+        visual_pr_dir.mkdir(exist_ok=True)
     if cfg.visualizations.feature_importance:
         visual_fi_dir.mkdir(exist_ok=True)
     if cfg.visualizations.shap_summary:
@@ -986,8 +1073,11 @@ def run_automl(config_path: Path) -> None:
                 ("preprocessor", transformer),
                 ("model", estimator_obj),
             ])
+            train_seconds = None
             try:
+                t0 = time.perf_counter()
                 pipeline_best.fit(X_train, y_train)
+                train_seconds = float(time.perf_counter() - t0)
             except Exception:
                 continue
             need_plot_data = (
@@ -1000,44 +1090,365 @@ def run_automl(config_path: Path) -> None:
                 )
             )
             y_train_array = np.asarray(y_train)
+            y_pred_train = None
+            train_metrics_display: Dict[str, Optional[float]] = {}
+            train_metrics_std: Dict[str, Optional[float]] = {}
             y_pred_for_plots: Optional[np.ndarray] = None
             residuals_for_plots: Optional[np.ndarray] = None
             r2_for_plots: Optional[float] = None
+            predict_seconds = None
+            predict_train_seconds = None
+            predict_test_seconds = None
             # Compute train predictions/metrics
             try:
+                t1 = time.perf_counter()
                 y_pred_train = np.asarray(pipeline_best.predict(X_train))
-                y_pred_for_plots = y_pred_train
-                residuals_for_plots = y_train_array - y_pred_train
-                r2_for_plots = float(r2_score(y_train_array, y_pred_train))
+                predict_train_seconds = float(time.perf_counter() - t1)
+                predict_seconds = predict_train_seconds
             except Exception:
-                y_pred_for_plots = None
-                residuals_for_plots = None
-                r2_for_plots = None
-            # Optionally compute test predictions/metrics
-            test_metrics = {}
-            y_pred_test = None
-            if X_test is not None and len(X_test) > 0:
-                try:
-                    y_pred_test = np.asarray(pipeline_best.predict(X_test))
-                    test_metrics = {
-                        "R2": float(r2_score(y_test, y_pred_test)),
-                        "MSE": float(mean_squared_error(y_test, y_pred_test)),
-                        "RMSE": float(np.sqrt(mean_squared_error(y_test, y_pred_test))),
-                        "MAE": float(mean_absolute_error(y_test, y_pred_test)),
-                    }
-                except Exception:
-                    test_metrics = {}
-            # Safe name for file outputs
-            safe_name = f"{model_label.replace(' ', '_').replace('(', '').replace(')', '').replace('+', '_')}_{preproc_name.replace('|', '_')}"
+                y_pred_train = None
+
+            metrics_requested = [str(m).strip().lower() for m in (metrics or []) if str(m).strip()]
+
             mse_val = None
             rmse_val = None
             mae_val = None
-            if y_pred_for_plots is not None:
+            n_classes = None
+            scores_for_plots_train = None
+            scores_for_plots_test = None
+
+            if y_pred_train is not None:
+                if problem_type == "regression":
+                    try:
+                        y_pred_for_plots = y_pred_train
+                        residuals_for_plots = y_train_array - y_pred_train
+                        r2_for_plots = float(r2_score(y_train_array, y_pred_train))
+                    except Exception:
+                        y_pred_for_plots = None
+                        residuals_for_plots = None
+                        r2_for_plots = None
+                    if y_pred_for_plots is not None:
+                        try:
+                            resid_tmp = (
+                                residuals_for_plots
+                                if residuals_for_plots is not None
+                                else (y_train_array - y_pred_for_plots)
+                            )
+                            mse_val = float(np.mean(resid_tmp ** 2))
+                            rmse_val = float(np.sqrt(mse_val))
+                            mae_val = float(mean_absolute_error(y_train_array, y_pred_for_plots))
+                        except Exception:
+                            pass
+
+                    train_metrics_display = {
+                        "R2": r2_for_plots,
+                        "MSE": mse_val,
+                        "RMSE": rmse_val,
+                        "MAE": mae_val,
+                    }
+                    train_metrics_std = {
+                        "r2": r2_for_plots,
+                        "mse": mse_val,
+                        "rmse": rmse_val,
+                        "mae": mae_val,
+                    }
+                else:
+                    y_true_train = y_train_array
+                    y_pred_labels_train = y_pred_train
+                    try:
+                        n_classes = int(len(np.unique(y_true_train)))
+                    except Exception:
+                        n_classes = None
+
+                    def _score_values(X_part):
+                        try:
+                            if hasattr(pipeline_best, "predict_proba"):
+                                return pipeline_best.predict_proba(X_part)
+                        except Exception:
+                            pass
+                        try:
+                            if hasattr(pipeline_best, "decision_function"):
+                                return pipeline_best.decision_function(X_part)
+                        except Exception:
+                            pass
+                        return None
+
+                    if "accuracy" in metrics_requested:
+                        try:
+                            val = float(accuracy_score(y_true_train, y_pred_labels_train))
+                            train_metrics_display["accuracy"] = val
+                            train_metrics_std["accuracy"] = val
+                        except Exception:
+                            pass
+                    if "precision_macro" in metrics_requested:
+                        try:
+                            val = float(precision_score(y_true_train, y_pred_labels_train, average="macro", zero_division=0))
+                            train_metrics_display["precision_macro"] = val
+                            train_metrics_std["precision_macro"] = val
+                        except Exception:
+                            pass
+                    if "recall_macro" in metrics_requested:
+                        try:
+                            val = float(recall_score(y_true_train, y_pred_labels_train, average="macro", zero_division=0))
+                            train_metrics_display["recall_macro"] = val
+                            train_metrics_std["recall_macro"] = val
+                        except Exception:
+                            pass
+                    if "f1_macro" in metrics_requested:
+                        try:
+                            val = float(f1_score(y_true_train, y_pred_labels_train, average="macro", zero_division=0))
+                            train_metrics_display["f1_macro"] = val
+                            train_metrics_std["f1_macro"] = val
+                        except Exception:
+                            pass
+                    if "roc_auc_ovr" in metrics_requested or "roc_auc" in metrics_requested:
+                        try:
+                            scores = _score_values(X_train)
+                            if scores is not None:
+                                scores_for_plots_train = scores
+                                model_step = None
+                                try:
+                                    model_step = pipeline_best.named_steps.get("model")
+                                except Exception:
+                                    model_step = None
+                                classes = getattr(model_step, "classes_", None)
+                                if classes is not None:
+                                    classes = list(classes)
+                                scores_arr = np.asarray(scores)
+                                roc_val = None
+                                if scores_arr.ndim == 2:
+                                    if scores_arr.shape[1] == 2 and classes and len(classes) >= 2:
+                                        y_bin = (np.asarray(y_true_train) == classes[1]).astype(int)
+                                        roc_val = float(roc_auc_score(y_bin, scores_arr[:, 1]))
+                                    elif classes and len(classes) == scores_arr.shape[1]:
+                                        mapping = {c: i for i, c in enumerate(classes)}
+                                        y_enc = np.asarray([mapping.get(v, -1) for v in np.asarray(y_true_train)], dtype=int)
+                                        mask = y_enc >= 0
+                                        if mask.any():
+                                            roc_val = float(
+                                                roc_auc_score(
+                                                    y_enc[mask],
+                                                    scores_arr[mask],
+                                                    multi_class="ovr",
+                                                    average="macro",
+                                                    labels=list(range(len(classes))),
+                                                )
+                                            )
+                                elif scores_arr.ndim == 1 and classes and len(classes) >= 2:
+                                    y_bin = (np.asarray(y_true_train) == classes[1]).astype(int)
+                                    roc_val = float(roc_auc_score(y_bin, scores_arr))
+                                if roc_val is not None:
+                                    train_metrics_display["roc_auc_ovr"] = roc_val
+                                    train_metrics_std["roc_auc_ovr"] = roc_val
+                        except Exception:
+                            pass
+            # Optionally compute test predictions/metrics
+            test_metrics: Dict[str, Optional[float]] = {}
+            test_metrics_std: Dict[str, Optional[float]] = {}
+            y_pred_test = None
+            if X_test is not None and len(X_test) > 0:
                 try:
-                    resid_tmp = residuals_for_plots if residuals_for_plots is not None else (y_train_array - y_pred_for_plots)
-                    mse_val = float(np.mean(resid_tmp ** 2))
-                    rmse_val = float(np.sqrt(mse_val))
-                    mae_val = float(mean_absolute_error(y_train_array, y_pred_for_plots))
+                    t2 = time.perf_counter()
+                    y_pred_test = np.asarray(pipeline_best.predict(X_test))
+                    predict_test_seconds = float(time.perf_counter() - t2)
+                    if problem_type == "regression":
+                        mse_test = float(mean_squared_error(y_test, y_pred_test))
+                        test_metrics = {
+                            "R2": float(r2_score(y_test, y_pred_test)),
+                            "MSE": mse_test,
+                            "RMSE": float(np.sqrt(mse_test)),
+                            "MAE": float(mean_absolute_error(y_test, y_pred_test)),
+                        }
+                        test_metrics_std = {
+                            "r2": test_metrics.get("R2"),
+                            "mse": test_metrics.get("MSE"),
+                            "rmse": test_metrics.get("RMSE"),
+                            "mae": test_metrics.get("MAE"),
+                        }
+                    else:
+                        y_true_test = np.asarray(y_test)
+                        y_pred_labels_test = y_pred_test
+                        if "accuracy" in metrics_requested:
+                            try:
+                                val = float(accuracy_score(y_true_test, y_pred_labels_test))
+                                test_metrics["accuracy"] = val
+                                test_metrics_std["accuracy"] = val
+                            except Exception:
+                                pass
+                        if "precision_macro" in metrics_requested:
+                            try:
+                                val = float(precision_score(y_true_test, y_pred_labels_test, average="macro", zero_division=0))
+                                test_metrics["precision_macro"] = val
+                                test_metrics_std["precision_macro"] = val
+                            except Exception:
+                                pass
+                        if "recall_macro" in metrics_requested:
+                            try:
+                                val = float(recall_score(y_true_test, y_pred_labels_test, average="macro", zero_division=0))
+                                test_metrics["recall_macro"] = val
+                                test_metrics_std["recall_macro"] = val
+                            except Exception:
+                                pass
+                        if "f1_macro" in metrics_requested:
+                            try:
+                                val = float(f1_score(y_true_test, y_pred_labels_test, average="macro", zero_division=0))
+                                test_metrics["f1_macro"] = val
+                                test_metrics_std["f1_macro"] = val
+                            except Exception:
+                                pass
+                        if "roc_auc_ovr" in metrics_requested or "roc_auc" in metrics_requested:
+                            try:
+                                scores = None
+                                try:
+                                    if hasattr(pipeline_best, "predict_proba"):
+                                        scores = pipeline_best.predict_proba(X_test)
+                                except Exception:
+                                    scores = None
+                                if scores is None:
+                                    try:
+                                        if hasattr(pipeline_best, "decision_function"):
+                                            scores = pipeline_best.decision_function(X_test)
+                                    except Exception:
+                                        scores = None
+                                if scores is not None:
+                                    scores_for_plots_test = scores
+                                    model_step = None
+                                    try:
+                                        model_step = pipeline_best.named_steps.get("model")
+                                    except Exception:
+                                        model_step = None
+                                    classes = getattr(model_step, "classes_", None)
+                                    if classes is not None:
+                                        classes = list(classes)
+                                    scores_arr = np.asarray(scores)
+                                    roc_val = None
+                                    if scores_arr.ndim == 2:
+                                        if scores_arr.shape[1] == 2 and classes and len(classes) >= 2:
+                                            y_bin = (np.asarray(y_true_test) == classes[1]).astype(int)
+                                            roc_val = float(roc_auc_score(y_bin, scores_arr[:, 1]))
+                                        elif classes and len(classes) == scores_arr.shape[1]:
+                                            mapping = {c: i for i, c in enumerate(classes)}
+                                            y_enc = np.asarray([mapping.get(v, -1) for v in np.asarray(y_true_test)], dtype=int)
+                                            mask = y_enc >= 0
+                                            if mask.any():
+                                                roc_val = float(
+                                                    roc_auc_score(
+                                                        y_enc[mask],
+                                                        scores_arr[mask],
+                                                        multi_class="ovr",
+                                                        average="macro",
+                                                        labels=list(range(len(classes))),
+                                                    )
+                                                )
+                                    elif scores_arr.ndim == 1 and classes and len(classes) >= 2:
+                                        y_bin = (np.asarray(y_true_test) == classes[1]).astype(int)
+                                        roc_val = float(roc_auc_score(y_bin, scores_arr))
+                                    if roc_val is not None:
+                                        test_metrics["roc_auc_ovr"] = roc_val
+                                        test_metrics_std["roc_auc_ovr"] = roc_val
+                            except Exception:
+                                pass
+                except Exception:
+                    test_metrics = {}
+                    test_metrics_std = {}
+            # Safe name for file outputs
+            safe_name = f"{model_label.replace(' ', '_').replace('(', '').replace(')', '').replace('+', '_')}_{preproc_name.replace('|', '_')}"
+            # Classification diagnostics: confusion matrix (saved as PNG/CSV, best-effort).
+            if problem_type == "classification" and cfg.output.generate_plots and y_pred_train is not None:
+                try:
+                    y_true_cm = np.asarray(y_test) if y_pred_test is not None else y_train_array
+                    y_pred_cm = np.asarray(y_pred_test) if y_pred_test is not None else np.asarray(y_pred_train)
+
+                    labels = None
+                    try:
+                        model_step = pipeline_best.named_steps.get("model")
+                        classes = getattr(model_step, "classes_", None)
+                        if classes is not None:
+                            labels = list(classes)
+                    except Exception:
+                        labels = None
+                    if not labels:
+                        try:
+                            labels = list(pd.unique(pd.Series(list(y_true_cm) + list(y_pred_cm))))
+                        except Exception:
+                            labels = None
+                    cm_paths = save_confusion_matrices(
+                        y_true=y_true_cm,
+                        y_pred=y_pred_cm,
+                        labels=labels,
+                        out_dir=visual_confusion_dir,
+                        base_name=safe_name,
+                        title_prefix=f"{model_label} ({preproc_name}) - ",
+                    )
+                    if clearml_mgr.logger:
+                        try:
+                            if cm_paths.confusion_png:
+                                clearml_mgr.logger.report_image(
+                                    title=f"confusion_{model_label} ({preproc_name})",
+                                    series="confusion_matrix_models",
+                                    local_path=str(cm_paths.confusion_png),
+                                )
+                        except Exception:
+                            pass
+                        try:
+                            if cm_paths.confusion_normalized_png:
+                                clearml_mgr.logger.report_image(
+                                    title=f"confusion_norm_{model_label} ({preproc_name})",
+                                    series="confusion_matrix_normalized_models",
+                                    local_path=str(cm_paths.confusion_normalized_png),
+                                )
+                        except Exception:
+                            pass
+
+                    # ROC / PR curves (only when score metric is requested; best-effort).
+                    try:
+                        if "roc_auc_ovr" in metrics_requested or "roc_auc" in metrics_requested:
+                            use_test = bool(y_pred_test is not None and X_test is not None)
+                            X_curve = X_test if use_test else X_train
+                            scores_curve = scores_for_plots_test if use_test else scores_for_plots_train
+                            if scores_curve is None:
+                                try:
+                                    if hasattr(pipeline_best, "predict_proba"):
+                                        scores_curve = pipeline_best.predict_proba(X_curve)
+                                except Exception:
+                                    scores_curve = None
+                                if scores_curve is None:
+                                    try:
+                                        if hasattr(pipeline_best, "decision_function"):
+                                            scores_curve = pipeline_best.decision_function(X_curve)
+                                    except Exception:
+                                        scores_curve = None
+                            if scores_curve is not None:
+                                curve_paths = save_roc_pr_curves(
+                                    y_true=y_true_cm,
+                                    scores=scores_curve,
+                                    classes=labels,
+                                    out_roc_dir=visual_roc_dir,
+                                    out_pr_dir=visual_pr_dir,
+                                    base_name=safe_name,
+                                    title_prefix=f"{model_label} ({preproc_name}) - ",
+                                )
+                                if clearml_mgr.logger:
+                                    try:
+                                        if curve_paths.roc_png:
+                                            clearml_mgr.logger.report_image(
+                                                title=f"roc_{model_label} ({preproc_name})",
+                                                series="roc_curve_models",
+                                                local_path=str(curve_paths.roc_png),
+                                            )
+                                    except Exception:
+                                        pass
+                                    try:
+                                        if curve_paths.pr_png:
+                                            clearml_mgr.logger.report_image(
+                                                title=f"pr_{model_label} ({preproc_name})",
+                                                series="pr_curve_models",
+                                                local_path=str(curve_paths.pr_png),
+                                            )
+                                    except Exception:
+                                        pass
+                    except Exception:
+                        pass
                 except Exception:
                     pass
             # Summary scatter/hist in training-summary task (ClearML scatter2d/hist)
@@ -1077,8 +1488,14 @@ def run_automl(config_path: Path) -> None:
             # Interpolation / feature space plot (PCA on transformed features)
             interp_path = visual_interp_dir / f"{safe_name}.png"
             proj_csv_path = visual_interp_dir / "feature_space_projection.csv"
+            n_features_transformed = None
             try:
                 Xt_full = pipeline_best.named_steps["preprocessor"].transform(X_train)
+                try:
+                    if hasattr(Xt_full, "shape") and len(Xt_full.shape) > 1:
+                        n_features_transformed = int(Xt_full.shape[1])
+                except Exception:
+                    n_features_transformed = None
                 plot_interpolation_space(Xt_full, y_train_array, interp_path, title=f"Interpolation space: {model_label}")
                 # store projection CSV (first two components)
                 try:
@@ -1104,9 +1521,15 @@ def run_automl(config_path: Path) -> None:
                 dump(pipeline_best, model_path)
             except Exception:
                 pass
+            model_size_bytes = None
+            try:
+                if model_path.exists():
+                    model_size_bytes = int(model_path.stat().st_size)
+            except Exception:
+                model_size_bytes = None
             # ClearML per-model training task
-            dataset_label = (dataset_id_for_load or Path(cfg.data.csv_path).stem or "dataset").replace(" ", "_")
-            model_task_name = f"train_{model_label}_ds={dataset_label}"
+            model_task_name = task_name("training_child", ctx, model=model_label, preproc=preproc_name)
+            child_tags = build_tags(ctx, phase="training", model=model_label, preproc=preproc_name, extra=[problem_type])
             task_obj = None
             if cfg.clearml and cfg.clearml.enabled:
                 DatasetCls, OutputModelCls, TaskCls, TaskTypesCls = _import_clearml()
@@ -1128,11 +1551,8 @@ def run_automl(config_path: Path) -> None:
                                     task_obj.set_parent(clearml_mgr.task.id)
                                 except Exception:
                                     pass
-                        tags_to_add = ["regression", model_label]
-                        if preproc_name:
-                            tags_to_add.append(preproc_name)
                         try:
-                            task_obj.add_tags(tags_to_add)
+                            task_obj.add_tags(child_tags)
                         except Exception:
                             pass
                         if cfg.clearml.queue and not cfg.clearml.run_tasks_locally:
@@ -1147,8 +1567,10 @@ def run_automl(config_path: Path) -> None:
                 task_name=model_task_name,
                 task_type="training",
                 default_project=train_models_project,
+                project=train_models_project,
                 parent=clearml_mgr.task.id if clearml_mgr.task else None,
                 existing_task=task_obj,
+                extra_tags=child_tags,
             )
             # Prefer connect_params; connect_configuration kept minimal
             try:
@@ -1183,46 +1605,113 @@ def run_automl(config_path: Path) -> None:
                     },
                     "training": {},
                 }
-                model_task_mgr.connect_params(params_connect)
+                model_task_mgr.connect_params_sections(
+                    {
+                        "Run": {"id": run_id, "dataset_key": dataset_key},
+                        "Data": {"dataset": params_connect.get("dataset") or {}, "split": params_connect.get("split") or {}},
+                        "Preprocessing": params_connect.get("preprocessing") or {},
+                        "Model": params_connect.get("model") or {},
+                    }
+                )
             except Exception:
                 pass
             try:
-                if r2_for_plots is not None:
-                    model_task_mgr.report_scalar("train", "R2", float(r2_for_plots), iteration=0)
-                if mse_val is not None:
-                    model_task_mgr.report_scalar("train", "MSE", float(mse_val), iteration=0)
-                if rmse_val is not None:
-                    model_task_mgr.report_scalar("train", "RMSE", float(rmse_val), iteration=0)
-                if mae_val is not None:
-                    model_task_mgr.report_scalar("train", "MAE", float(mae_val), iteration=0)
-                if test_metrics:
-                    for m_name, m_val in test_metrics.items():
-                        if m_val is not None:
-                            model_task_mgr.report_scalar("test", m_name, float(m_val), iteration=0)
+                for m_name, m_val in (train_metrics_display or {}).items():
+                    if m_val is None:
+                        continue
+                    model_task_mgr.report_scalar("train", str(m_name), float(m_val), iteration=0)
+                for m_name, m_val in (test_metrics or {}).items():
+                    if m_val is None:
+                        continue
+                    model_task_mgr.report_scalar("test", str(m_name), float(m_val), iteration=0)
+            except Exception:
+                pass
+            # Standardized compare-friendly scalars (title-based keys).
+            try:
+                has_test_metrics = False
+                try:
+                    has_test_metrics = bool(
+                        isinstance(test_metrics_std, dict) and any(v is not None for v in test_metrics_std.values())
+                    )
+                except Exception:
+                    has_test_metrics = False
+
+                preferred_metrics = (test_metrics_std or {}) if has_test_metrics else (train_metrics_std or {})
+                train_metrics_only = (train_metrics_std or {}) if has_test_metrics else None
+                report_metric_scalars(
+                    model_task_mgr,
+                    train_metrics=preferred_metrics,
+                    test_metrics=train_metrics_only,
+                    iteration=0,
+                    train_prefix="metric",
+                    test_prefix="metric_train",
+                )
+            except Exception:
+                pass
+            try:
+                if train_seconds is not None:
+                    model_task_mgr.report_scalar("time/train_seconds", "value", float(train_seconds), iteration=0)
+                if predict_seconds is not None:
+                    model_task_mgr.report_scalar("time/predict_seconds", "value", float(predict_seconds), iteration=0)
+                if predict_train_seconds is not None:
+                    model_task_mgr.report_scalar(
+                        "time/predict_train_seconds", "value", float(predict_train_seconds), iteration=0
+                    )
+                if predict_test_seconds is not None:
+                    model_task_mgr.report_scalar(
+                        "time/predict_test_seconds", "value", float(predict_test_seconds), iteration=0
+                    )
+            except Exception:
+                pass
+            try:
+                n_rows_train = int(len(X_train)) if X_train is not None else 0
+                n_rows_test = int(len(X_test)) if X_test is not None else 0
+                n_features_raw = int(X_train.shape[1]) if hasattr(X_train, "shape") and len(X_train.shape) > 1 else None
+                model_task_mgr.report_scalar("model/num_rows_train", "value", float(n_rows_train), iteration=0)
+                model_task_mgr.report_scalar("model/num_rows_test", "value", float(n_rows_test), iteration=0)
+                if n_features_raw is not None:
+                    model_task_mgr.report_scalar("model/num_features_raw", "value", float(n_features_raw), iteration=0)
+                if n_features_transformed is not None:
+                    model_task_mgr.report_scalar(
+                        "model/num_features", "value", float(n_features_transformed), iteration=0
+                    )
+                if n_classes is not None:
+                    model_task_mgr.report_scalar("model/num_classes", "value", float(n_classes), iteration=0)
+                if model_size_bytes is not None:
+                    model_task_mgr.report_scalar("model/size_bytes", "value", float(model_size_bytes), iteration=0)
             except Exception:
                 pass
             model_task_mgr.register_output_model(model_path, name=model_label)
             try:
-                related_plots = list((output_dir / "scatter_plots").glob(f"{model_label.replace(' ', '_')}*.png"))
-                related_plots += list((output_dir / "feature_importances_models").glob(f"{model_label.replace(' ', '_')}*.png"))
-                related_csvs = list((output_dir / "scatter_plots").glob(f"{model_label.replace(' ', '_')}*.csv"))
-                related_csvs += list((output_dir / "residual_scatter").glob(f"{model_label.replace(' ', '_')}*.csv"))
-                related_csvs += list((output_dir / "residual_hist").glob(f"{model_label.replace(' ', '_')}*.csv"))
-                related_plots += list((output_dir / "interpolation_space").glob(f"{model_label.replace(' ', '_')}*.png"))
-                model_task_mgr.upload_artifacts([p for p in (related_plots + related_csvs) if p.exists()])
+                related_paths = [
+                    visual_pred_dir / f"{safe_name}.png",
+                    visual_pred_dir / f"{safe_name}.csv",
+                    visual_resid_scatter_dir / f"{safe_name}.png",
+                    visual_resid_scatter_dir / f"{safe_name}.csv",
+                    visual_resid_hist_dir / f"{safe_name}.png",
+                    visual_resid_hist_dir / f"{safe_name}.csv",
+                    visual_interp_dir / f"{safe_name}.png",
+                    visual_confusion_dir / f"{safe_name}.png",
+                    visual_confusion_dir / f"{safe_name}.csv",
+                    visual_confusion_dir / f"{safe_name}_normalized.png",
+                    visual_confusion_dir / f"{safe_name}_normalized.csv",
+                    visual_roc_dir / f"{safe_name}.png",
+                    visual_roc_dir / f"{safe_name}.csv",
+                    visual_pr_dir / f"{safe_name}.png",
+                    visual_pr_dir / f"{safe_name}.csv",
+                    visual_fi_dir / f"{safe_name}.png",
+                    visual_shap_dir / f"{safe_name}.png",
+                ]
+                model_task_mgr.upload_artifacts([p for p in related_paths if p.exists()])
             except Exception:
                 pass
             # Metrics table in ClearML plots
             try:
-                metrics_rows = [
-                    {"metric": "R2", "split": "train", "value": r2_for_plots},
-                    {"metric": "MSE", "split": "train", "value": mse_val},
-                    {"metric": "RMSE", "split": "train", "value": rmse_val},
-                    {"metric": "MAE", "split": "train", "value": mae_val},
-                ]
-                if test_metrics:
-                    for k, v in test_metrics.items():
-                        metrics_rows.append({"metric": k, "split": "test", "value": v})
+                metrics_rows = []
+                for k, v in (train_metrics_display or {}).items():
+                    metrics_rows.append({"metric": str(k), "split": "train", "value": v})
+                for k, v in (test_metrics or {}).items():
+                    metrics_rows.append({"metric": str(k), "split": "test", "value": v})
                 model_task_mgr.report_table("metrics_table", pd.DataFrame(metrics_rows), series="metrics")
             except Exception:
                 pass
@@ -1256,6 +1745,10 @@ def run_automl(config_path: Path) -> None:
                     (visual_resid_scatter_dir / f"{safe_name}.png", "residual_scatter"),
                     (visual_resid_hist_dir / f"{safe_name}.png", "residual_hist"),
                     (visual_interp_dir / f"{safe_name}.png", "interpolation_space"),
+                    (visual_confusion_dir / f"{safe_name}.png", "confusion_matrix"),
+                    (visual_confusion_dir / f"{safe_name}_normalized.png", "confusion_matrix_normalized"),
+                    (visual_roc_dir / f"{safe_name}.png", "roc_curve"),
+                    (visual_pr_dir / f"{safe_name}.png", "pr_curve"),
                     (visual_fi_dir / f"{safe_name}.png", "feature_importance"),
                     (visual_shap_dir / f"{safe_name}.png", "shap_summary"),
                 ]:
@@ -1340,6 +1833,10 @@ def run_automl(config_path: Path) -> None:
                     visual_resid_scatter_dir / f"{safe_name}.png",
                     visual_resid_hist_dir / f"{safe_name}.png",
                     visual_interp_dir / f"{safe_name}.png",
+                    visual_confusion_dir / f"{safe_name}.png",
+                    visual_confusion_dir / f"{safe_name}_normalized.png",
+                    visual_roc_dir / f"{safe_name}.png",
+                    visual_pr_dir / f"{safe_name}.png",
                     visual_fi_dir / f"{safe_name}.png",
                     visual_shap_dir / f"{safe_name}.png",
                 ]
@@ -1357,19 +1854,28 @@ def run_automl(config_path: Path) -> None:
                 task_url = None
                 if model_task_mgr.task and hasattr(model_task_mgr.task, "get_output_log_web_page"):
                     task_url = model_task_mgr.task.get_output_log_web_page()
-                model_task_records.append(
-                    {
-                        "model": model_label,
-                        "preprocessor": preproc_name,
-                        "task_id": model_task_mgr.task.id if model_task_mgr.task else "",
-                        "url": task_url or "",
-                        "link_html": f'<a href="{task_url}">{model_label} ({preproc_name})</a>' if task_url else "",
-                        "r2": r2_for_plots,
-                        "mse": mse_val,
-                        "rmse": rmse_val,
-                        "mae": mae_val,
-                    }
-                )
+                record = {
+                    "model": model_label,
+                    "preprocessor": preproc_name,
+                    "task_id": model_task_mgr.task.id if model_task_mgr.task else "",
+                    "url": task_url or "",
+                    "link_html": f'<a href="{task_url}">{model_label} ({preproc_name})</a>' if task_url else "",
+                }
+                try:
+                    has_test_metrics = False
+                    try:
+                        has_test_metrics = bool(
+                            isinstance(test_metrics_std, dict) and any(v is not None for v in test_metrics_std.values())
+                        )
+                    except Exception:
+                        has_test_metrics = False
+                    metrics_source = "test" if has_test_metrics else "train"
+                    record["metric_source"] = metrics_source
+                    metrics_for_record = (test_metrics_std or {}) if has_test_metrics else (train_metrics_std or {})
+                    record.update({k: v for k, v in metrics_for_record.items()})
+                except Exception:
+                    pass
+                model_task_records.append(record)
             except Exception:
                 pass
             if model_task_mgr.task:
@@ -1621,23 +2127,43 @@ def run_automl(config_path: Path) -> None:
         # Save predictions and metrics CSV artifacts
         try:
             preds_rows = []
-            if y_pred_for_plots is not None:
-                for idx, (yt, yp) in enumerate(zip(y_train_array, y_pred_for_plots)):
-                    preds_rows.append({"sample": idx, "split": "train", "y_true": yt, "y_pred": yp, "residual": yt - yp})
+            if y_pred_train is not None:
+                for idx, (yt, yp) in enumerate(zip(y_train_array, y_pred_train)):
+                    row = {"sample": idx, "split": "train", "y_true": yt, "y_pred": yp}
+                    if problem_type == "regression":
+                        try:
+                            row["residual"] = float(yt - yp)
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            row["correct"] = bool(yt == yp)
+                        except Exception:
+                            pass
+                    preds_rows.append(row)
             if y_pred_test is not None:
                 for idx, (yt, yp) in enumerate(zip(y_test, y_pred_test)):
-                    preds_rows.append({"sample": idx, "split": "test", "y_true": yt, "y_pred": yp, "residual": yt - yp})
+                    row = {"sample": idx, "split": "test", "y_true": yt, "y_pred": yp}
+                    if problem_type == "regression":
+                        try:
+                            row["residual"] = float(yt - yp)
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            row["correct"] = bool(yt == yp)
+                        except Exception:
+                            pass
+                    preds_rows.append(row)
             if preds_rows:
                 preds_df = pd.DataFrame(preds_rows)
                 preds_path = output_dir / f"predictions_{safe_name}.csv"
                 preds_df.to_csv(preds_path, index=False)
             metrics_records = []
-            metrics_records.append({"metric": "R2", "split": "train", "value": r2_for_plots})
-            metrics_records.append({"metric": "MSE", "split": "train", "value": mse_val})
-            metrics_records.append({"metric": "RMSE", "split": "train", "value": rmse_val})
-            metrics_records.append({"metric": "MAE", "split": "train", "value": mae_val})
-            for k, v in test_metrics.items():
-                metrics_records.append({"metric": k, "split": "test", "value": v})
+            for k, v in (train_metrics_display or {}).items():
+                metrics_records.append({"metric": str(k), "split": "train", "value": v})
+            for k, v in (test_metrics or {}).items():
+                metrics_records.append({"metric": str(k), "split": "test", "value": v})
             metrics_df = pd.DataFrame(metrics_records)
             metrics_path = output_dir / f"metrics_{safe_name}.csv"
             metrics_df.to_csv(metrics_path, index=False)
@@ -1645,10 +2171,67 @@ def run_automl(config_path: Path) -> None:
             pass
     # Record links to per-model tasks for debugging / navigation
     try:
-        if clearml_mgr.logger and model_task_records:
-            df_links = pd.DataFrame(model_task_records)
+        df_links = pd.DataFrame(model_task_records) if model_task_records else pd.DataFrame()
+        if not df_links.empty:
+            try:
+                df_links.to_csv(output_dir / "model_metrics.csv", index=False)
+            except Exception:
+                pass
+
+        # Always persist recommended model summary to output_dir (ClearML on/off).
+        recommended_df = None
+        try:
+            metric_key = str(primary_metric_model).strip().lower() if primary_metric_model else ""
+            if not df_links.empty and metric_key and metric_key in df_links.columns:
+                vals = pd.to_numeric(df_links[metric_key], errors="coerce")
+                if vals.notna().any():
+                    minimize_metrics = {"mse", "rmse", "mae", "mape", "smape", "logloss", "loss", "error"}
+                    goal = "min" if metric_key in minimize_metrics else "max"
+                    best_idx = vals.idxmin() if goal == "min" else vals.idxmax()
+                    best_row = df_links.loc[best_idx].to_dict()
+                    recommended = {
+                        "run_id": run_id,
+                        "dataset_key": dataset_key,
+                        "primary_metric": metric_key,
+                        "goal": goal,
+                        "metric_source": best_row.get("metric_source", ""),
+                        "model": best_row.get("model", ""),
+                        "preprocessor": best_row.get("preprocessor", ""),
+                        metric_key: best_row.get(metric_key),
+                        "task_id": best_row.get("task_id", ""),
+                        "url": best_row.get("url", ""),
+                        "link_html": best_row.get("link_html", ""),
+                    }
+                    recommended_df = pd.DataFrame([recommended])
+                    try:
+                        recommended_df.to_csv(output_dir / "recommended_model.csv", index=False)
+                    except Exception:
+                        pass
+        except Exception:
+            recommended_df = None
+
+        if clearml_mgr.logger and not df_links.empty:
             clearml_mgr.report_table("DEbugsamples", df_links, series="DEbugsamples")
             clearml_mgr.report_table("model_metrics", df_links, series="metrics")
+            if recommended_df is not None and not recommended_df.empty:
+                clearml_mgr.report_table("recommended_model", recommended_df, series="summary")
+                try:
+                    metric_key = str(primary_metric_model).strip().lower() if primary_metric_model else ""
+                    val_best = float(pd.to_numeric(recommended_df.iloc[0].get(metric_key), errors="coerce"))
+                    if val_best == val_best:  # not NaN
+                        clearml_mgr.report_scalar(f"training/best_{metric_key}", "value", val_best, iteration=0)
+                except Exception:
+                    pass
+                try:
+                    link_html = str(recommended_df.iloc[0].get("link_html") or "")
+                    metric_key = str(recommended_df.iloc[0].get("primary_metric") or "")
+                    if link_html:
+                        clearml_mgr.logger.report_text(
+                            f"Recommended model:<br/>{link_html}<br/>{metric_key}={recommended_df.iloc[0].get(metric_key)}",
+                            title="recommended_model",
+                        )
+                except Exception:
+                    pass
             # Also emit HTML list soリンクを直接クリック可能
             try:
                 links_html = "<br/>".join([row["link_html"] for row in model_task_records if row.get("link_html")])
@@ -1660,22 +2243,28 @@ def run_automl(config_path: Path) -> None:
         pass
     # Debugsamples: plot artifact listing for summary task
     try:
-        plot_rows = []
-        for pf in [
-            *output_dir.glob("*.png"),
-            *(output_dir / "scatter_plots").glob("*.png"),
-            *(output_dir / "residual_scatter").glob("*.png"),
-            *(output_dir / "residual_hist").glob("*.png"),
-            *(output_dir / "interpolation_space").glob("*.png"),
-        ]:
-            plot_rows.append({"file": pf.name, "path": str(pf)})
-        if plot_rows:
-            clearml_mgr.report_table("plot_artifacts", pd.DataFrame(plot_rows), series="DEbugsamples")
+        plot_df = build_plot_artifacts_table(output_dir)
+        if not plot_df.empty:
+            try:
+                plot_df.to_csv(output_dir / "plot_artifacts.csv", index=False)
+            except Exception:
+                pass
+            if clearml_mgr.logger:
+                clearml_mgr.report_table("plot_artifacts", plot_df, series="DEbugsamples")
     except Exception:
         pass
     # Upload key artifacts to ClearML
     try:
         artifacts_to_upload = [results_path, results_path.with_suffix(".json")]
+        rec_csv = output_dir / "recommended_model.csv"
+        if rec_csv.exists():
+            artifacts_to_upload.append(rec_csv)
+        model_metrics_csv = output_dir / "model_metrics.csv"
+        if model_metrics_csv.exists():
+            artifacts_to_upload.append(model_metrics_csv)
+        plot_artifacts_csv = output_dir / "plot_artifacts.csv"
+        if plot_artifacts_csv.exists():
+            artifacts_to_upload.append(plot_artifacts_csv)
         # feature space projection artifact (PCA on first model) if exists
         proj_csv = output_dir / "interpolation_space" / "feature_space_projection.csv"
         if proj_csv.exists():
@@ -1689,6 +2278,12 @@ def run_automl(config_path: Path) -> None:
             artifacts_to_upload.extend((output_dir / "residual_hist").glob("*.png"))
             artifacts_to_upload.extend((output_dir / "metric_hists").glob("*.png"))
             artifacts_to_upload.extend((output_dir / "interpolation_space").glob("*.png"))
+            artifacts_to_upload.extend((output_dir / "confusion_matrices").glob("*.png"))
+            artifacts_to_upload.extend((output_dir / "confusion_matrices").glob("*.csv"))
+            artifacts_to_upload.extend((output_dir / "roc_curves").glob("*.png"))
+            artifacts_to_upload.extend((output_dir / "roc_curves").glob("*.csv"))
+            artifacts_to_upload.extend((output_dir / "pr_curves").glob("*.png"))
+            artifacts_to_upload.extend((output_dir / "pr_curves").glob("*.csv"))
             artifacts_to_upload.extend((output_dir / "feature_importances_models").glob("*.png"))
             artifacts_to_upload.extend((output_dir / "shap_summaries_models").glob("*.png"))
             artifacts_to_upload.extend((output_dir / "scatter_plots").glob("*.csv"))

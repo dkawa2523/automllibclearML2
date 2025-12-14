@@ -50,10 +50,51 @@ def init_task(
     parent: Optional[str] = None,
     tags: Optional[Iterable[str]] = None,
     reuse: bool = False,
+    force_new_task: bool = False,
 ):
     if Task is None:
         return None
-    if not reuse:
+    # If running inside an existing ClearML task (e.g., cloned/enqueued execution),
+    # prefer reusing the current task to avoid creating orphan tasks.
+    current_task_id = os.environ.get("CLEARML_TASK_ID")
+    if not force_new_task and current_task_id and str(current_task_id).strip():
+        try:
+            task = Task.current_task()
+            if task:
+                if parent:
+                    try:
+                        if hasattr(task, "add_parent"):
+                            task.add_parent(parent)
+                        else:
+                            task.set_parent(parent)
+                    except Exception:
+                        pass
+                if tags:
+                    try:
+                        seen = set()
+                        uniq = []
+                        for t in list(tags):
+                            s = str(t).strip()
+                            if not s or s in seen:
+                                continue
+                            seen.add(s)
+                            uniq.append(s)
+                        if uniq:
+                            task.add_tags(uniq)
+                    except Exception:
+                        pass
+                if queue:
+                    try:
+                        task.set_parameter("requested_queue", queue)
+                    except Exception:
+                        pass
+                return task
+        except Exception:
+            pass
+
+    original_task_id = current_task_id
+    if force_new_task or not reuse:
+        # Detach from any existing task id only when creating a new task object.
         os.environ.pop("CLEARML_TASK_ID", None)
         os.environ["CLEARML_TASK_ID"] = ""
     try:
@@ -80,7 +121,16 @@ def init_task(
                     pass
         if tags:
             try:
-                task.add_tags(list(tags))
+                seen = set()
+                uniq = []
+                for t in list(tags):
+                    s = str(t).strip()
+                    if not s or s in seen:
+                        continue
+                    seen.add(s)
+                    uniq.append(s)
+                if uniq:
+                    task.add_tags(uniq)
             except Exception:
                 pass
         if queue:
@@ -88,6 +138,9 @@ def init_task(
                 task.set_parameter("requested_queue", queue)
             except Exception:
                 pass
+        # Restore the original task id if we temporarily detached to create a child task.
+        if force_new_task and original_task_id and str(original_task_id).strip():
+            os.environ["CLEARML_TASK_ID"] = str(original_task_id)
         return task
     except Exception:
         return None
@@ -104,7 +157,16 @@ def create_child_task(
     parent_id = None
     if parent_task and hasattr(parent_task, "id"):
         parent_id = parent_task.id
-    return init_task(project, name, task_type, queue=queue, parent=parent_id, tags=tags, reuse=False)
+    return init_task(
+        project,
+        name,
+        task_type,
+        queue=queue,
+        parent=parent_id,
+        tags=tags,
+        reuse=False,
+        force_new_task=True,
+    )
 
 
 def load_input_model(model_id: str) -> Optional[Path]:

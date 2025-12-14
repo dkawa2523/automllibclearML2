@@ -13,16 +13,19 @@ from .datasets import (
     ensure_local_dataset_copy,
     dataframe_from_dataset,
     find_first_dataset_id_by_tag,
+    add_tags_to_dataset,
     register_dataset_from_path,
 )
 from .logging import (
     report_hyperparams,
+    report_hyperparams_sections,
     report_table,
     report_scalar,
     report_plotly,
     report_image,
     upload_artifacts,
 )
+from .clone import clone_task
 
 __all__ = [
     "init_task",
@@ -37,11 +40,14 @@ __all__ = [
     "ensure_local_dataset_copy",
     "dataframe_from_dataset",
     "find_first_dataset_id_by_tag",
+    "add_tags_to_dataset",
     "register_dataset_from_path",
     "report_hyperparams",
+    "report_hyperparams_sections",
     "report_table",
     "report_scalar",
     "report_plotly",
     "report_image",
     "upload_artifacts",
+    "clone_task",
 ]

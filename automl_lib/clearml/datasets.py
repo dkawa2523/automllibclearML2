@@ -87,6 +87,20 @@ def find_first_dataset_id_by_tag(tag: str, dataset_project: Optional[str]) -> Op
     return None
 
 
+def add_tags_to_dataset(dataset_id: str, tags: Iterable[str]) -> None:
+    Dataset = _import_dataset()
+    if Dataset is None:
+        return
+    tag_list = [str(t) for t in tags if str(t).strip()]
+    if not tag_list:
+        return
+    try:
+        ds = Dataset.get(dataset_id=str(dataset_id))
+        ds.add_tags(tag_list)
+    except Exception:
+        return
+
+
 def register_dataset_from_path(
     *,
     name: str,
@@ -130,4 +144,3 @@ def register_dataset_from_path(
         return ds.id
     except Exception:
         return None
-

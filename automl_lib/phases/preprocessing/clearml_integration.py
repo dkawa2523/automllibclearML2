@@ -6,15 +6,34 @@ ClearML integration for preprocessing phase.
 import os
 from typing import Dict, Any, Optional
 
-from automl_lib.clearml import init_task, report_hyperparams, upload_artifacts
+from automl_lib.clearml import init_task, report_hyperparams_sections, upload_artifacts
+from automl_lib.clearml.context import build_run_context, get_run_id_env, resolve_dataset_key, resolve_run_id
+from automl_lib.clearml.naming import build_project_path, build_tags, task_name
 
 
 def create_preprocessing_task(config: Dict[str, Any], parent_task_id: Optional[str] = None) -> Dict[str, Any]:
     clearml_cfg = config.get("clearml") or {}
-    project = clearml_cfg.get("project_name") or "AutoML"
+    run_cfg = config.get("run") or {}
+    data_cfg = config.get("data") or {}
+    run_id = resolve_run_id(from_config=run_cfg.get("id"), from_env=get_run_id_env())
+    dataset_key = resolve_dataset_key(
+        explicit=run_cfg.get("dataset_key"),
+        dataset_id=data_cfg.get("dataset_id"),
+        csv_path=data_cfg.get("csv_path"),
+    )
+    ctx = build_run_context(
+        run_id=run_id,
+        dataset_key=dataset_key,
+        project_root=clearml_cfg.get("project_name") or "AutoML",
+        dataset_project=clearml_cfg.get("dataset_project"),
+        user=run_cfg.get("user"),
+    )
+    naming_cfg = clearml_cfg.get("naming") or {}
+    project = build_project_path(ctx, project_mode=naming_cfg.get("project_mode", "root"))
     queue = clearml_cfg.get("queue")
     if not clearml_cfg.get("enabled", False):
         return {"task": None, "logger": None, "project": project, "queue": queue}
+    tags = build_tags(ctx, phase="preprocessing", extra=clearml_cfg.get("tags"))
 
     # If running inside ClearML PipelineController local/agent step, reuse the step task.
     if os.environ.get("AUTO_ML_PIPELINE_ACTIVE") == "1":
@@ -24,7 +43,20 @@ def create_preprocessing_task(config: Dict[str, Any], parent_task_id: Optional[s
             current = Task.current_task()
             if current:
                 try:
-                    report_hyperparams(current, config)
+                    current.add_tags(tags)
+                except Exception:
+                    pass
+                try:
+                    report_hyperparams_sections(
+                        current,
+                        {
+                            "Run": config.get("run") or {},
+                            "Data": config.get("data") or {},
+                            "Preprocessing": config.get("preprocessing") or {},
+                            "Output": config.get("output") or {},
+                            "ClearML": clearml_cfg,
+                        },
+                    )
                 except Exception:
                     pass
                 return {"task": current, "logger": current.get_logger(), "project": project, "queue": queue}
@@ -33,17 +65,26 @@ def create_preprocessing_task(config: Dict[str, Any], parent_task_id: Optional[s
 
     task = init_task(
         project=project,
-        name="preprocessing",
+        name=task_name("preprocessing", ctx),
         task_type="data_processing",
         queue=queue,
         parent=parent_task_id,
-        tags=clearml_cfg.get("tags"),
+        tags=tags,
         reuse=False,
     )
     logger = task.get_logger() if task else None
     if task:
         try:
-            report_hyperparams(task, config)
+            report_hyperparams_sections(
+                task,
+                {
+                    "Run": config.get("run") or {},
+                    "Data": config.get("data") or {},
+                    "Preprocessing": config.get("preprocessing") or {},
+                    "Output": config.get("output") or {},
+                    "ClearML": clearml_cfg,
+                },
+            )
         except Exception:
             pass
     return {"task": task, "logger": logger, "project": project, "queue": queue}

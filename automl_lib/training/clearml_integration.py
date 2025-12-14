@@ -93,8 +93,10 @@ class ClearMLManager:
         task_name: str,
         task_type: str,
         default_project: str = "AutoML",
+        project: Optional[str] = None,
         parent: Optional[str] = None,
         existing_task: Any = None,
+        extra_tags: Optional[List[str]] = None,
     ) -> None:
         if parent is None:
             parent = os.environ.get("AUTO_ML_PARENT_TASK_ID")
@@ -103,6 +105,32 @@ class ClearMLManager:
         self.task = None
         self.logger = None
         self.output_uri = cfg.base_output_uri if cfg else None
+        combined_tags: List[str] = []
+        if cfg and cfg.tags:
+            combined_tags.extend([str(t) for t in cfg.tags if str(t).strip()])
+        if extra_tags:
+            combined_tags.extend([str(t) for t in extra_tags if str(t).strip()])
+        # de-duplicate while preserving order
+        seen = set()
+        tags = []
+        for t in combined_tags:
+            if t in seen:
+                continue
+            seen.add(t)
+            tags.append(t)
+
+        # If executing inside an existing ClearML task (e.g., cloned/enqueued execution),
+        # prefer reusing the current task for the top-level (parent=None) manager.
+        if existing_task is None and parent is None and self.enabled:
+            current_task_id = os.environ.get("CLEARML_TASK_ID")
+            if current_task_id and str(current_task_id).strip():
+                _, _, Task, _ = _import_clearml()
+                if Task is not None:
+                    try:
+                        existing_task = Task.current_task()
+                    except Exception:
+                        existing_task = None
+
         if existing_task is not None:
             self.task = existing_task
             try:
@@ -110,10 +138,17 @@ class ClearMLManager:
             except Exception:
                 self.logger = None
             self.enabled = True
+            if tags:
+                try:
+                    self.task.add_tags(tags)
+                except Exception:
+                    pass
             return
         if not self.enabled:
             return
-        # Avoid accidental reuse of a previous task id
+        # Avoid accidental reuse of a previous task id (but keep the original
+        # task id around so remote/cloned executions do not lose it).
+        original_task_id = os.environ.get("CLEARML_TASK_ID")
         os.environ.pop("CLEARML_TASK_ID", None)
         os.environ["CLEARML_TASK_ID"] = ""
         Dataset, OutputModel, Task, TaskTypes = _import_clearml()
@@ -138,13 +173,12 @@ class ClearMLManager:
                         pass
         except Exception:
             pass
-        project = (cfg.project_name or default_project) if cfg else default_project
-        tags = list(cfg.tags) if cfg and cfg.tags else []
+        project_name = project or ((cfg.project_name or default_project) if cfg else default_project)
         # Reduce overhead / avoid hangs from repo & resource scanning
         os.environ.setdefault("CLEARML_SKIP_PIP_FREEZE", "1")
         try:
             self.task = Task.init(
-                project_name=project,
+                project_name=project_name,
                 task_name=task_name,
                 task_type=_map_task_type(task_type, TaskTypes),
                 reuse_last_task_id=False,
@@ -166,6 +200,8 @@ class ClearMLManager:
             # Stash queue preference for visibility; do not force remote execution here.
             if cfg.queue and not cfg.run_tasks_locally:
                 self.task.set_parameter("requested_queue", cfg.queue)
+            if original_task_id and str(original_task_id).strip():
+                os.environ["CLEARML_TASK_ID"] = str(original_task_id)
         except Exception as exc:  # pragma: no cover - optional dependency path
             print(f"ClearML task initialisation failed; continuing without ClearML. Reason: {exc}")
             self.enabled = False
@@ -193,6 +229,32 @@ class ClearMLManager:
             self.task.connect(_to_serialisable(obj))
         except Exception:
             pass
+
+    def connect_params_sections(self, sections: Dict[str, Any]) -> None:
+        """Register params into ClearML Hyperparameters using multiple named sections."""
+
+        if not self.task:
+            return
+        if not isinstance(sections, dict):
+            return
+        for section_name, payload in sections.items():
+            name = str(section_name).strip()
+            if not name:
+                continue
+            if payload is None:
+                continue
+            serialised = _to_serialisable(payload)
+            if isinstance(serialised, dict) and not serialised:
+                continue
+            try:
+                self.task.connect(serialised, name=name)
+            except TypeError:
+                try:
+                    self.task.connect(serialised)
+                except Exception:
+                    pass
+            except Exception:
+                pass
 
     def report_table(self, title: str, df: pd.DataFrame, series: str = "table", iteration: int = 0) -> None:
         if not self.logger:

@@ -9,7 +9,7 @@ from typing import Dict, Any, Optional
 from automl_lib.clearml import (
     init_task,
     create_child_task,
-    report_hyperparams,
+    report_hyperparams_sections,
     upload_artifacts,
 )
 
@@ -41,7 +41,20 @@ def create_training_tasks(
     # Hyperparametersを親タスクに登録
     if summary_task:
         try:
-            report_hyperparams(summary_task, config)
+            report_hyperparams_sections(
+                summary_task,
+                {
+                    "Run": config.get("run") or {},
+                    "Data": config.get("data") or {},
+                    "Preprocessing": config.get("preprocessing") or {},
+                    "ModelCandidates": {"models": config.get("models") or [], "ensembles": config.get("ensembles") or {}},
+                    "CrossValidation": config.get("cross_validation") or {},
+                    "Evaluation": config.get("evaluation") or {},
+                    "Optimization": config.get("optimization") or {},
+                    "Output": config.get("output") or {},
+                    "ClearML": clearml_cfg,
+                },
+            )
         except Exception:
             pass
 

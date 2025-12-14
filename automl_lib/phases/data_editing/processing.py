@@ -7,6 +7,7 @@ import pandas as pd
 from automl_lib.clearml import (
     dataframe_from_dataset,
     find_first_dataset_id_by_tag,
+    add_tags_to_dataset,
     hash_tag_for_path,
     register_dataset_from_path,
     disable_resource_monitoring,
@@ -14,6 +15,9 @@ from automl_lib.clearml import (
 from automl_lib.clearml.logging import report_table
 from automl_lib.config.loaders import load_data_editing_config
 from automl_lib.types import DatasetInfo
+from automl_lib.clearml.context import get_run_id_env, resolve_run_id, set_run_id_env
+from automl_lib.clearml.context import build_run_context, resolve_dataset_key
+from automl_lib.clearml.naming import dataset_name, build_tags
 
 from automl_lib.phases.data_editing.clearml_integration import create_data_editing_task
 
@@ -22,10 +26,27 @@ def run_data_editing_processing(
     config_path: Path,
     input_info: Optional[Dict[str, Any]] = None,
     parent_task_id: Optional[str] = None,
+    *,
+    run_id: Optional[str] = None,
 ):
     config_path = Path(config_path)
     cfg = load_data_editing_config(config_path)
+    try:
+        from automl_lib.clearml.overrides import apply_overrides, get_task_overrides
+
+        overrides = get_task_overrides()
+        if overrides:
+            cfg = type(cfg).model_validate(apply_overrides(cfg.model_dump(), overrides))
+    except Exception:
+        pass
     clearml_cfg = cfg.clearml
+    run_id = resolve_run_id(
+        explicit=run_id,
+        from_input=(input_info or {}).get("run_id"),
+        from_config=getattr(cfg.run, "id", None),
+        from_env=get_run_id_env(),
+    )
+    set_run_id_env(run_id)
 
     # PipelineController local step tasks default to auto_resource_monitoring=True (noisy on non-GPU envs).
     if os.environ.get("AUTO_ML_PIPELINE_ACTIVE") == "1":
@@ -38,8 +59,10 @@ def run_data_editing_processing(
 
     # Avoid task reuse for this phase (do not touch step tasks inside PipelineController)
     if os.environ.get("AUTO_ML_PIPELINE_ACTIVE") != "1":
-        os.environ.pop("CLEARML_TASK_ID", None)
-        os.environ["CLEARML_TASK_ID"] = ""
+        current = os.environ.get("CLEARML_TASK_ID")
+        if not (current and str(current).strip()):
+            os.environ.pop("CLEARML_TASK_ID", None)
+            os.environ["CLEARML_TASK_ID"] = ""
 
     def _load_df(dataset_id: Optional[str], csv_path: Optional[str]) -> pd.DataFrame:
         if dataset_id:
@@ -61,23 +84,58 @@ def run_data_editing_processing(
             dataset_id=str(dataset_id_passthrough) if dataset_id_passthrough else None,
             task_id=str(task_id_passthrough) if task_id_passthrough else None,
             csv_path=str(csv_path_passthrough) if csv_path_passthrough else None,
+            run_id=run_id,
         ).model_dump()
 
     if clearml_cfg and clearml_cfg.edited_dataset_id:
         csv_src = (input_info or {}).get("csv_path") or cfg.data.csv_path
-        return DatasetInfo(dataset_id=clearml_cfg.edited_dataset_id, task_id=(input_info or {}).get("task_id"), csv_path=csv_src).model_dump()
+        return DatasetInfo(
+            dataset_id=clearml_cfg.edited_dataset_id,
+            task_id=(input_info or {}).get("task_id"),
+            csv_path=csv_src,
+            run_id=run_id,
+        ).model_dump()
 
     parent_id = parent_task_id or (input_info or {}).get("task_id")
-    task_info = create_data_editing_task(cfg.model_dump(), parent_task_id=parent_id)
-    task = task_info.get("task")
-    logger = task_info.get("logger")
-
     dataset_id_source = (
         (input_info or {}).get("dataset_id")
         or (clearml_cfg.raw_dataset_id if clearml_cfg else None)
         or cfg.data.dataset_id
     )
     csv_src = (input_info or {}).get("csv_path") or cfg.data.csv_path
+    dataset_key = resolve_dataset_key(
+        explicit=getattr(cfg.run, "dataset_key", None),
+        dataset_id=str(dataset_id_source) if dataset_id_source else None,
+        csv_path=csv_src,
+    )
+    ctx = build_run_context(
+        run_id=run_id,
+        dataset_key=dataset_key,
+        project_root=(clearml_cfg.project_name if clearml_cfg else None),
+        dataset_project=(clearml_cfg.dataset_project if clearml_cfg else None),
+        user=getattr(cfg.run, "user", None),
+    )
+    cfg_for_task = cfg.model_dump()
+    try:
+        cfg_for_task.setdefault("run", {})
+        cfg_for_task["run"]["id"] = run_id
+        cfg_for_task["run"]["dataset_key"] = dataset_key
+        if getattr(cfg.run, "user", None):
+            cfg_for_task["run"]["user"] = cfg.run.user
+    except Exception:
+        pass
+    try:
+        cfg_for_task.setdefault("data", {})
+        if dataset_id_source:
+            cfg_for_task["data"]["dataset_id"] = str(dataset_id_source)
+        if csv_src:
+            cfg_for_task["data"]["csv_path"] = str(csv_src)
+    except Exception:
+        pass
+
+    task_info = create_data_editing_task(cfg_for_task, parent_task_id=parent_id)
+    task = task_info.get("task")
+    logger = task_info.get("logger")
 
     df_before = _load_df(str(dataset_id_source) if dataset_id_source else None, csv_src)
     df_after = df_before.copy()
@@ -145,14 +203,22 @@ def run_data_editing_processing(
                     task.upload_artifact("duplicate_dataset_id", artifact_object=str(existing), wait_on_upload=True)
             except Exception:
                 pass
+            try:
+                add_tags_to_dataset(
+                    existing,
+                    build_tags(ctx, phase="data_editing", extra=[*(clearml_cfg.tags or []), "edited", hash_tag]),
+                )
+            except Exception:
+                pass
             dataset_id = existing
         else:
+            ds_tags = build_tags(ctx, phase="data_editing", extra=[*(clearml_cfg.tags or []), "edited", hash_tag])
             registered = register_dataset_from_path(
-                name="edited-dataset",
+                name=dataset_name("edited", ctx),
                 path=out_path,
                 dataset_project=clearml_cfg.dataset_project,
                 parent_ids=[str(dataset_id_source)] if dataset_id_source else None,
-                tags=["edited", "phase:data-editing", hash_tag],
+                tags=ds_tags,
                 output_uri=clearml_cfg.base_output_uri,
             )
             if registered:
@@ -169,4 +235,9 @@ def run_data_editing_processing(
     except Exception:
         pass
 
-    return DatasetInfo(dataset_id=str(dataset_id) if dataset_id else None, task_id=(task.id if task else None), csv_path=str(out_path)).model_dump()
+    return DatasetInfo(
+        dataset_id=str(dataset_id) if dataset_id else None,
+        task_id=(task.id if task else None),
+        csv_path=str(out_path),
+        run_id=run_id,
+    ).model_dump()

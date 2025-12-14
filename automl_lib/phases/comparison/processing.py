@@ -4,12 +4,14 @@ ClearML 上の学習タスク群からメトリクスを集計し、比較タス
 """
 
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import pandas as pd
 
 from automl_lib.clearml import disable_resource_monitoring
+from automl_lib.clearml.context import get_run_id_env, resolve_dataset_key, resolve_run_id, set_run_id_env
 from automl_lib.clearml.logging import report_scalar, report_table
 from automl_lib.config.loaders import load_comparison_config
 from automl_lib.phases.comparison.clearml_integration import create_comparison_task, finalize_comparison_task
@@ -26,6 +28,8 @@ def run_comparison_processing(
     config_path: Path,
     training_info: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None,
     parent_task_id: Optional[Union[str, Sequence[str]]] = None,
+    *,
+    run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Execute comparison phase based on training_info (expects training_task_ids).
@@ -33,8 +37,31 @@ def run_comparison_processing(
     config_path = Path(config_path)
 
     cfg = load_comparison_config(config_path)
+    try:
+        from automl_lib.clearml.overrides import apply_overrides, get_task_overrides
+
+        overrides = get_task_overrides()
+        if overrides:
+            cfg = type(cfg).model_validate(apply_overrides(cfg.model_dump(), overrides))
+    except Exception:
+        pass
     clearml_cfg = cfg.clearml
     ranking_cfg = getattr(cfg, "ranking", None)
+    from_input = None
+    try:
+        if isinstance(training_info, dict):
+            from_input = training_info.get("run_id")
+        elif isinstance(training_info, list) and len(training_info) == 1 and isinstance(training_info[0], dict):
+            from_input = training_info[0].get("run_id")
+    except Exception:
+        from_input = None
+    run_id = resolve_run_id(
+        explicit=run_id,
+        from_input=from_input,
+        from_config=getattr(cfg.run, "id", None),
+        from_env=get_run_id_env(),
+    )
+    set_run_id_env(run_id)
 
     # PipelineController local step tasks default to auto_resource_monitoring=True (noisy on non-GPU envs).
     if os.environ.get("AUTO_ML_PIPELINE_ACTIVE") == "1":
@@ -118,8 +145,10 @@ def run_comparison_processing(
 
     # Avoid task reuse for comparison (except inside pipeline step task)
     if os.environ.get("AUTO_ML_PIPELINE_ACTIVE") != "1":
-        os.environ.pop("CLEARML_TASK_ID", None)
-        os.environ["CLEARML_TASK_ID"] = ""
+        current = os.environ.get("CLEARML_TASK_ID")
+        if not (current and str(current).strip()):
+            os.environ.pop("CLEARML_TASK_ID", None)
+            os.environ["CLEARML_TASK_ID"] = ""
 
     def _normalize_training_infos(value: Any) -> List[Dict[str, Any]]:
         if value is None:
@@ -222,6 +251,31 @@ def run_comparison_processing(
             ti0, pid0 = run_specs[0]
             parent_id = pid0 or (ti0 or {}).get("task_id")
         config_dict = cfg.model_dump() if hasattr(cfg, "model_dump") else cfg.dict()  # type: ignore[attr-defined]
+        try:
+            dataset_id_for_key = None
+            if len(training_infos) == 1:
+                dataset_id_for_key = (training_infos[0] or {}).get("dataset_id")
+            dataset_key = resolve_dataset_key(
+                explicit=getattr(cfg.run, "dataset_key", None),
+                dataset_id=str(dataset_id_for_key) if dataset_id_for_key else None,
+                csv_path=None,
+            )
+            if len(training_infos) > 1:
+                dataset_key = "multi"
+        except Exception:
+            dataset_key = "unknown"
+        try:
+            config_dict.setdefault("run", {})
+            config_dict["run"]["id"] = run_id
+            config_dict["run"]["dataset_key"] = dataset_key
+        except Exception:
+            pass
+        try:
+            if dataset_id_for_key:
+                config_dict.setdefault("data", {})
+                config_dict["data"]["dataset_id"] = str(dataset_id_for_key)
+        except Exception:
+            pass
         task = create_comparison_task(config_dict, parent_task_id=str(parent_id) if parent_id else None)
         try:
             logger = task.get_logger() if task else None
@@ -230,6 +284,31 @@ def run_comparison_processing(
 
     if logger and isinstance(meta.get("ranked_df"), pd.DataFrame):
         ranked_for_vis = meta["ranked_df"]
+        # Basic stats scalars (useful for comparing comparison runs)
+        try:
+            report_scalar(logger, title="comparison/n_candidates", series="value", value=float(len(ranked_for_vis)))
+        except Exception:
+            pass
+        try:
+            if "model" in ranked_for_vis.columns:
+                report_scalar(
+                    logger,
+                    title="comparison/n_models",
+                    series="value",
+                    value=float(ranked_for_vis["model"].nunique(dropna=True)),
+                )
+        except Exception:
+            pass
+        try:
+            if "preprocessor" in ranked_for_vis.columns:
+                report_scalar(
+                    logger,
+                    title="comparison/n_preprocessors",
+                    series="value",
+                    value=float(ranked_for_vis["preprocessor"].nunique(dropna=True)),
+                )
+        except Exception:
+            pass
         top_k = None
         if ranking_cfg and getattr(ranking_cfg, "top_k", None):
             try:
@@ -251,6 +330,39 @@ def run_comparison_processing(
                 metric = best.get("primary_metric")
                 if metric and isinstance(best_row, dict) and metric in best_row:
                     report_scalar(logger, title=f"best_{metric}", series="best", value=float(best_row[metric]))
+            except Exception:
+                pass
+            # Standardized scalars for comparing comparison-runs.
+            try:
+                best_row = best.get("best_row") or {}
+                metric = str(best.get("primary_metric") or "").strip().lower()
+                if metric and isinstance(best_row, dict) and metric in best_row and best_row[metric] is not None:
+                    report_scalar(
+                        logger,
+                        title=f"comparison/best_{metric}",
+                        series="value",
+                        value=float(best_row[metric]),
+                    )
+            except Exception:
+                pass
+            try:
+                ranked_topk_df = meta.get("ranked_topk_df")
+                metric = str(best.get("primary_metric") or "").strip().lower()
+                if (
+                    isinstance(ranked_topk_df, pd.DataFrame)
+                    and not ranked_topk_df.empty
+                    and metric
+                    and metric in ranked_topk_df.columns
+                ):
+                    vals = pd.to_numeric(ranked_topk_df[metric], errors="coerce")
+                    mean_val = float(vals.mean())
+                    if mean_val == mean_val:  # not NaN
+                        report_scalar(
+                            logger,
+                            title=f"comparison/topk_mean_{metric}",
+                            series="value",
+                            value=mean_val,
+                        )
             except Exception:
                 pass
 
@@ -279,13 +391,31 @@ def run_comparison_processing(
                 metric = best.get("primary_metric")
             metric = str(metric or primary_metric or (desired_metrics[0] if desired_metrics else "rmse")).strip().lower()
             render_model_summary_visuals(logger, meta["model_summary_df"], primary_metric=metric)
+        if isinstance(meta.get("recommended_model"), dict):
+            try:
+                rec = meta.get("recommended_model") or {}
+                stats = rec.get("stats") if isinstance(rec, dict) else None
+                row = dict(stats) if isinstance(stats, dict) else {}
+                if isinstance(rec, dict):
+                    row.setdefault("selected_model", rec.get("selected_model"))
+                    row.setdefault("strategy", rec.get("strategy"))
+                    row.setdefault("primary_metric", rec.get("primary_metric"))
+                    row.setdefault("goal", rec.get("goal"))
+                if row:
+                    report_table(logger, title="recommended_model", df=pd.DataFrame([row]), series="summary")
+            except Exception:
+                pass
 
     try:
         finalize_comparison_task(task, artifact_paths=meta.get("artifacts", []))
     except Exception:
         pass
 
-    info = ComparisonInfo(task_id=(task.id if task else None), artifacts=list(meta.get("artifacts", []) or []))
+    info = ComparisonInfo(
+        task_id=(task.id if task else None),
+        artifacts=list(meta.get("artifacts", []) or []),
+        run_id=run_id,
+    )
 
     try:
         if task:
@@ -307,6 +437,56 @@ def _collect_metrics_from_tasks(task_ids: List[str], metric_names: List[str]) ->
     except Exception:
         return []
 
+    def _last_scalar_value(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            try:
+                return float(value)
+            except Exception:
+                return None
+        if isinstance(value, dict):
+            for key in ["y", "value", "last"]:
+                if key in value:
+                    return _last_scalar_value(value.get(key))
+        if isinstance(value, list) and value:
+            return _last_scalar_value(value[-1])
+        if isinstance(value, tuple) and value:
+            return _last_scalar_value(value[-1])
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    def _get_reported_scalar(task_obj, title: str, series: Optional[str] = None) -> Optional[float]:
+        try:
+            scalars = task_obj.get_reported_scalars()
+        except Exception:
+            scalars = None
+        if not isinstance(scalars, dict):
+            return None
+        title_key = title
+        if title_key not in scalars:
+            # best-effort fallback (case variations)
+            for cand in [title.lower(), title.upper()]:
+                if cand in scalars:
+                    title_key = cand
+                    break
+        data = scalars.get(title_key)
+        if not isinstance(data, dict) or not data:
+            return None
+        if series:
+            series_key = series
+            if series_key not in data:
+                for cand in [series.lower(), series.upper()]:
+                    if cand in data:
+                        series_key = cand
+                        break
+            return _last_scalar_value(data.get(series_key))
+        # no series specified: take first
+        first = next(iter(data.values()))
+        return _last_scalar_value(first)
+
     rows: List[Dict[str, Any]] = []
     for tid in task_ids:
         try:
@@ -318,11 +498,35 @@ def _collect_metrics_from_tasks(task_ids: List[str], metric_names: List[str]) ->
         except Exception:
             sv = {}
         name = t.name if t else tid
-        model = name.split(" - ")[0] if " - " in name else name
-        preproc = name.split(" - ")[1] if " - " in name else ""
+        model = name
+        preproc = ""
+        if " - " in name:
+            model = name.split(" - ")[0]
+            preproc = name.split(" - ")[1]
+        else:
+            # New naming: "train [<preproc>] [<model>] [<run_id>]" or "train [<model>] [<run_id>]"
+            try:
+                lowered = str(name).strip().lower()
+                if lowered.startswith("train "):
+                    parts = re.findall(r"\\[([^\\]]+)\\]", str(name))
+                    if len(parts) == 2:
+                        model = parts[0]
+                    elif len(parts) >= 3:
+                        preproc = parts[0]
+                        model = parts[1]
+            except Exception:
+                pass
         row = {"task_id": tid, "task_name": name, "model": model, "preprocessor": preproc}
         for m in metric_names:
-            row[m] = sv.get(m) or sv.get(m.upper()) or sv.get(m.lower())
+            key = str(m).strip().lower()
+            val = sv.get(key) or sv.get(key.upper()) or sv.get(key.lower())
+            if val is None:
+                # New convention: title="metric/<metric>", series="value"
+                val = _get_reported_scalar(t, f"metric/{key}", "value")
+            if val is None:
+                # Legacy convention: title="train", series="R2" etc.
+                val = _get_reported_scalar(t, "train", key.upper()) or _get_reported_scalar(t, "train", key)
+            row[m] = val
         rows.append(row)
     return rows
 

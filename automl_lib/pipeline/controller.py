@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 
 from automl_lib.config.loaders import load_training_config
 from automl_lib.config.schemas import TrainingConfig
+from automl_lib.clearml.context import get_run_id_env, resolve_dataset_key, resolve_run_id, set_run_id_env
 
 
 def run_pipeline(
@@ -18,6 +19,16 @@ def run_pipeline(
     comparison_config: Optional[Path] = None,
 ) -> Dict[str, Any]:
     cfg = load_training_config(config_path)
+    try:
+        from automl_lib.clearml.overrides import apply_overrides, get_task_overrides
+
+        overrides = get_task_overrides()
+        if overrides:
+            cfg = type(cfg).model_validate(apply_overrides(cfg.model_dump(), overrides))
+    except Exception:
+        pass
+    run_id = resolve_run_id(from_config=getattr(cfg.run, "id", None), from_env=get_run_id_env())
+    set_run_id_env(run_id)
     data_registration_config = _resolve_optional_config_path(data_registration_config, "config_dataregit.yaml")
     data_editing_config = _resolve_optional_config_path(data_editing_config, "config_editing.yaml")
     preprocessing_config = _resolve_optional_config_path(preprocessing_config, "config_preprocessing.yaml")
@@ -27,6 +38,7 @@ def run_pipeline(
         return _run_in_process_pipeline(
             config_path,
             cfg,
+            run_id=run_id,
             data_registration_config=data_registration_config,
             data_editing_config=data_editing_config,
             preprocessing_config=preprocessing_config,
@@ -36,6 +48,7 @@ def run_pipeline(
         info = _run_clearml_pipeline_controller(
             config_path,
             cfg,
+            run_id=run_id,
             data_registration_config=data_registration_config,
             data_editing_config=data_editing_config,
             preprocessing_config=preprocessing_config,
@@ -49,6 +62,7 @@ def run_pipeline(
         info = _run_clearml_pipeline_controller(
             config_path,
             cfg,
+            run_id=run_id,
             data_registration_config=data_registration_config,
             data_editing_config=data_editing_config,
             preprocessing_config=preprocessing_config,
@@ -59,6 +73,7 @@ def run_pipeline(
     return _run_in_process_pipeline(
         config_path,
         cfg,
+        run_id=run_id,
         data_registration_config=data_registration_config,
         data_editing_config=data_editing_config,
         preprocessing_config=preprocessing_config,
@@ -90,6 +105,7 @@ def _run_in_process_pipeline(
     config_path: Path,
     cfg: TrainingConfig,
     *,
+    run_id: str,
     data_registration_config: Optional[Path],
     data_editing_config: Optional[Path],
     preprocessing_config: Optional[Path],
@@ -102,11 +118,11 @@ def _run_in_process_pipeline(
     comparison_cfg_path = comparison_config or config_path
 
     dataset_id = _resolve_input_dataset_id(cfg)
-    input_info: Dict[str, Any] = {"csv_path": cfg.data.csv_path}
+    input_info: Dict[str, Any] = {"csv_path": cfg.data.csv_path, "run_id": run_id}
     if dataset_id:
         input_info["dataset_id"] = dataset_id
 
-    ret: Dict[str, Any] = {"mode": "in_process"}
+    ret: Dict[str, Any] = {"mode": "in_process", "run_id": run_id}
 
     # Optional: data_registration (CSV -> ClearML Dataset)
     if cfg.clearml and cfg.clearml.register_raw_dataset:
@@ -177,6 +193,7 @@ def _run_clearml_pipeline_controller(
     config_path: Path,
     cfg: TrainingConfig,
     *,
+    run_id: str,
     data_registration_config: Optional[Path],
     data_editing_config: Optional[Path],
     preprocessing_config: Optional[Path],
@@ -190,10 +207,13 @@ def _run_clearml_pipeline_controller(
     dataset_id = _resolve_input_dataset_id(cfg)
 
     # Avoid reusing a previous task id for the controller
-    os.environ.pop("CLEARML_TASK_ID", None)
-    os.environ["CLEARML_TASK_ID"] = ""
+    current_task_id = os.environ.get("CLEARML_TASK_ID")
+    if not (current_task_id and str(current_task_id).strip()):
+        os.environ.pop("CLEARML_TASK_ID", None)
+        os.environ["CLEARML_TASK_ID"] = ""
     # Flag to tell sub-phases they run inside pipeline (avoid closing tasks too early)
     os.environ["AUTO_ML_PIPELINE_ACTIVE"] = "1"
+    os.environ["AUTO_ML_RUN_ID"] = str(run_id)
 
     try:
         from clearml.automation.controller import PipelineController  # type: ignore
@@ -212,7 +232,13 @@ def _run_clearml_pipeline_controller(
     preprocessing_cfg_path = preprocessing_config or config_path
     comparison_cfg_path = comparison_config or config_path
 
-    pipeline_name = cfg.clearml.task_name or f"pipeline-{Path(config_path).stem}"
+    dataset_key = resolve_dataset_key(
+        explicit=getattr(cfg.run, "dataset_key", None),
+        dataset_id=str(dataset_id) if dataset_id else None,
+        csv_path=getattr(cfg.data, "csv_path", None),
+    )
+    base_pipeline_name = cfg.clearml.task_name or f"pipeline-{Path(config_path).stem}"
+    pipeline_name = f"{base_pipeline_name} [{dataset_key}] [{run_id}]"
     project_name = cfg.clearml.project_name or "AutoML"
     print(f"[PipelineController] init controller name={pipeline_name} project={project_name}")
 
@@ -235,7 +261,7 @@ def _run_clearml_pipeline_controller(
         def _q(agent_key: str) -> Optional[str]:
             return _agent_queue(cfg.clearml, agent_key) or default_queue
 
-        input_info: Dict[str, Any] = {"csv_path": cfg.data.csv_path}
+        input_info: Dict[str, Any] = {"csv_path": cfg.data.csv_path, "run_id": run_id}
         if dataset_id:
             input_info["dataset_id"] = dataset_id
 
@@ -251,7 +277,7 @@ def _run_clearml_pipeline_controller(
                 name="data_registration",
                 parents=[],
                 function=run_data_registration_processing,
-                function_kwargs={"config_path": str(data_registration_config)},
+                function_kwargs={"config_path": str(data_registration_config), "run_id": run_id},
                 execution_queue=_q("data_registration"),
                 function_return=["result"],
             )
@@ -271,6 +297,7 @@ def _run_clearml_pipeline_controller(
                 function_kwargs={
                     "config_path": str(data_editing_config),
                     "input_info": (last_result_expr or input_info),
+                    "run_id": run_id,
                 },
                 execution_queue=_q("data_editing"),
                 function_return=["result"],
@@ -294,6 +321,7 @@ def _run_clearml_pipeline_controller(
             function_kwargs={
                 "config_path": str(preprocessing_cfg_path),
                 "input_info": (last_result_expr or input_info),
+                "run_id": run_id,
             },
             execution_queue=_q("preprocessing"),
             function_return=["result"],
@@ -308,6 +336,7 @@ def _run_clearml_pipeline_controller(
             function_kwargs={
                 "config_path": str(config_path),
                 "input_info": last_result_expr,
+                "run_id": run_id,
             },
             execution_queue=_q("training"),
             function_return=["result"],
@@ -323,6 +352,7 @@ def _run_clearml_pipeline_controller(
                 function_kwargs={
                     "config_path": str(comparison_cfg_path),
                     "training_info": "${training.result}",
+                    "run_id": run_id,
                 },
                 execution_queue=cfg.clearml.comparison_agent or default_queue or controller_queue,
                 function_return=["result"],
@@ -347,6 +377,7 @@ def _run_clearml_pipeline_controller(
             "mode": "clearml_pipeline",
             "pipeline_task_id": pipeline_task_id,
             "dataset_id": dataset_id,
+            "run_id": run_id,
         }
     except Exception as exc:
         print(f"[PipelineController] failed to run pipeline: {exc}")

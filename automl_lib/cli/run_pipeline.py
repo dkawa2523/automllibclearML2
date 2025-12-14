@@ -3,7 +3,7 @@ import argparse
 
 from automl_lib.pipeline.controller import run_pipeline
 from automl_lib.config.loaders import load_training_config
-from automl_lib.cli.common import clearml_avoid_task_reuse, print_and_write_json
+from automl_lib.cli.common import clearml_avoid_task_reuse, maybe_clone_from_config, print_and_write_json
 
 
 def main() -> None:
@@ -48,7 +48,9 @@ def main() -> None:
     )
     args = parser.parse_args()
     # Validate config
-    load_training_config(args.config)
+    cfg = load_training_config(args.config)
+    if maybe_clone_from_config(cfg, phase="pipeline", output_info=args.output_info):
+        return
     # Avoid task reuse
     clearml_avoid_task_reuse()
     result = run_pipeline(

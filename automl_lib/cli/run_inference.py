@@ -4,7 +4,7 @@ import argparse
 from automl_lib.phases import run_inference
 from automl_lib.config.loaders import load_inference_config
 from automl_lib.cli.common import clearml_avoid_task_reuse
-from automl_lib.cli.common import print_and_write_json
+from automl_lib.cli.common import maybe_clone_from_config, print_and_write_json
 
 
 def main() -> None:
@@ -17,7 +17,9 @@ def main() -> None:
         help="Optional path to write inference info as JSON.",
     )
     args = parser.parse_args()
-    load_inference_config(args.config)
+    cfg = load_inference_config(args.config)
+    if maybe_clone_from_config(cfg, phase="inference", output_info=args.output_info):
+        return
     clearml_avoid_task_reuse()
     result = run_inference(args.config)
     try:

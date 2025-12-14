@@ -6,7 +6,9 @@ Hyperparameters登録、Artifacts/Plots/DebugSamplesの報告を一箇所にま�
 """
 
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from dataclasses import asdict, is_dataclass
+import json
+from typing import Any, Dict, Iterable, Mapping, Optional
 
 from .bootstrap import ensure_clearml_config_file
 
@@ -26,6 +28,56 @@ def report_hyperparams(task, params: Dict[str, Any]) -> None:
         task.connect(params)
     except Exception:
         pass
+
+
+def _to_serialisable(obj: Any) -> Any:
+    if is_dataclass(obj):
+        return asdict(obj)
+    if hasattr(obj, "model_dump"):
+        try:
+            return obj.model_dump()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+    if hasattr(obj, "dict"):
+        try:
+            return obj.dict()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+    if isinstance(obj, Mapping):
+        return dict(obj)
+    try:
+        json.dumps(obj)
+        return obj
+    except Exception:
+        return str(obj)
+
+
+def report_hyperparams_sections(task, sections: Dict[str, Dict[str, Any]]) -> None:
+    """Register hyperparameters into ClearML task using multiple named sections."""
+
+    if not task:
+        return
+    if not isinstance(sections, dict):
+        return
+
+    for section_name, params in sections.items():
+        name = str(section_name).strip()
+        if not name:
+            continue
+        if params is None:
+            continue
+        payload = _to_serialisable(params)
+        if isinstance(payload, dict) and not payload:
+            continue
+        try:
+            task.connect(payload, name=name)
+        except TypeError:
+            try:
+                task.connect(payload)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
 
 def report_table(logger, title: str, df, series: str = "table", iteration: int = 0) -> None:

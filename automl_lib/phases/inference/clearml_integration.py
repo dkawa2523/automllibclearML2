@@ -5,7 +5,7 @@ ClearML integration for inference phase.
 
 from typing import Dict, Any, Optional
 
-from automl_lib.clearml import init_task, create_child_task, report_hyperparams, upload_artifacts
+from automl_lib.clearml import init_task, create_child_task, report_hyperparams_sections, upload_artifacts
 
 
 def create_inference_summary_task(config: Dict[str, Any], parent_task_id: Optional[str] = None) -> Dict[str, Any]:
@@ -24,7 +24,14 @@ def create_inference_summary_task(config: Dict[str, Any], parent_task_id: Option
     logger = task.get_logger() if task else None
     if task:
         try:
-            report_hyperparams(task, config)
+            report_hyperparams_sections(
+                task,
+                {
+                    "Run": config.get("run") or {},
+                    "Inference": {k: v for k, v in (config.items() if isinstance(config, dict) else []) if k not in {"clearml"}},
+                    "ClearML": clearml_cfg,
+                },
+            )
         except Exception:
             pass
     return {"task": task, "logger": logger, "project": project, "queue": queue}

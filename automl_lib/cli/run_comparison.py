@@ -3,7 +3,7 @@ import argparse
 
 from automl_lib.phases import run_comparison
 from automl_lib.config.loaders import load_comparison_config
-from automl_lib.cli.common import clearml_avoid_task_reuse, load_json_or_yaml, print_and_write_json
+from automl_lib.cli.common import clearml_avoid_task_reuse, load_json_or_yaml, maybe_clone_from_config, print_and_write_json
 
 
 def main() -> None:
@@ -40,7 +40,9 @@ def main() -> None:
         config_path = Path("config_comparison.yaml")
         if not config_path.exists():
             config_path = Path("config.yaml")
-    load_comparison_config(config_path)
+    cfg = load_comparison_config(config_path)
+    if maybe_clone_from_config(cfg, phase="comparison", output_info=args.output_info):
+        return
     clearml_avoid_task_reuse()
     training_infos = []
     if args.training_info:

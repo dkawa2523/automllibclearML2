@@ -22,6 +22,32 @@ _MINIMIZE_METRICS = {
 }
 
 
+def _markdown_table(df: pd.DataFrame, *, max_rows: int = 10) -> str:
+    """Create a small GitHub-flavored markdown table without extra deps."""
+
+    if df is None or df.empty:
+        return "_(empty)_\n"
+    head = df.head(max_rows)
+    cols = [str(c) for c in head.columns]
+    lines = []
+    lines.append("| " + " | ".join(cols) + " |")
+    lines.append("| " + " | ".join(["---"] * len(cols)) + " |")
+    for _, row in head.iterrows():
+        vals = []
+        for c in cols:
+            try:
+                v = row.get(c)
+            except Exception:
+                v = ""
+            s = "" if v is None else str(v)
+            s = s.replace("|", "\\|")
+            vals.append(s)
+        lines.append("| " + " | ".join(vals) + " |")
+    if len(df) > len(head):
+        lines.append(f"\n_(showing first {len(head)} of {len(df)} rows)_\n")
+    return "\n".join(lines) + "\n"
+
+
 def _resolve_goal(metric: Optional[str], explicit: Optional[str] = None) -> Optional[str]:
     if explicit:
         lowered = str(explicit).strip().lower()
@@ -357,6 +383,52 @@ def build_comparison_metadata(
             with recommended_json.open("w", encoding="utf-8") as f:
                 json.dump(recommended_model, f, ensure_ascii=False, indent=2)
             artifacts.append(str(recommended_json))
+
+        # Human-friendly summary (Markdown)
+        try:
+            summary_md = output_dir / "comparison_summary.md"
+            with summary_md.open("w", encoding="utf-8") as f:
+                f.write("# Comparison Summary\n\n")
+                f.write(f"- primary_metric: {primary_metric}\n")
+                f.write(f"- goal: {goal}\n")
+                if group_col:
+                    f.write(f"- group_col: {group_col}\n")
+                if top_k:
+                    f.write(f"- top_k: {top_k}\n")
+                f.write("\n")
+
+                if best is not None and isinstance(best, dict):
+                    f.write("## Best\n\n")
+                    try:
+                        best_row = best.get("best_row") or {}
+                        if isinstance(best_row, dict) and best_row:
+                            f.write(_markdown_table(pd.DataFrame([best_row])))
+                    except Exception:
+                        pass
+
+                if recommended_model is not None and isinstance(recommended_model, dict):
+                    f.write("## Recommended Model\n\n")
+                    try:
+                        stats = recommended_model.get("stats") if isinstance(recommended_model, dict) else None
+                        row = dict(stats) if isinstance(stats, dict) else {}
+                        row.setdefault("selected_model", recommended_model.get("selected_model"))
+                        row.setdefault("strategy", recommended_model.get("strategy"))
+                        row.setdefault("primary_metric", recommended_model.get("primary_metric"))
+                        row.setdefault("goal", recommended_model.get("goal"))
+                        if row:
+                            f.write(_markdown_table(pd.DataFrame([row])))
+                    except Exception:
+                        pass
+
+                if ranked_topk_df is not None and isinstance(ranked_topk_df, pd.DataFrame) and not ranked_topk_df.empty:
+                    f.write("## TopK\n\n")
+                    try:
+                        f.write(_markdown_table(ranked_topk_df))
+                    except Exception:
+                        pass
+            artifacts.append(str(summary_md))
+        except Exception:
+            pass
 
     return {
         "df": df,

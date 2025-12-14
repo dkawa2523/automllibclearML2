@@ -16,6 +16,7 @@ class DatasetInfo(BaseModel):
     dataset_id: Optional[str] = None
     task_id: Optional[str] = None
     csv_path: Optional[str] = None
+    run_id: Optional[str] = None
 
 
 class TrainingInfo(BaseModel):
@@ -27,6 +28,7 @@ class TrainingInfo(BaseModel):
     task_id: Optional[str] = None
     training_task_ids: List[str] = Field(default_factory=list)
     metrics: Optional[List[Dict[str, Any]]] = None
+    run_id: Optional[str] = None
 
 
 class ComparisonInfo(BaseModel):
@@ -36,6 +38,7 @@ class ComparisonInfo(BaseModel):
 
     task_id: Optional[str] = None
     artifacts: List[str] = Field(default_factory=list)
+    run_id: Optional[str] = None
 
 
 class InferenceInfo(BaseModel):
@@ -48,3 +51,4 @@ class InferenceInfo(BaseModel):
     output_dir: Optional[str] = None
     artifacts: List[str] = Field(default_factory=list)
     mode: Optional[str] = None
+    run_id: Optional[str] = None

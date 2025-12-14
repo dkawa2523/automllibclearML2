@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 from pathlib import Path
 
 from automl_lib.clearml import disable_resource_monitoring
+from automl_lib.clearml.context import get_run_id_env, resolve_run_id, set_run_id_env
 from automl_lib.training import run_automl
 from automl_lib.types import TrainingInfo
 
@@ -17,6 +18,8 @@ def run_training_processing(
     config_path: Path,
     input_info: Optional[Dict[str, Any]] = None,
     parent_task_id: Optional[str] = None,
+    *,
+    run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run training phase inside automl_lib.
@@ -28,6 +31,23 @@ def run_training_processing(
     - metrics (optional; per-model records)
     """
     config_path = Path(config_path)
+    from automl_lib.config.loaders import load_training_config
+
+    cfg = load_training_config(config_path)
+    try:
+        from automl_lib.clearml.overrides import apply_overrides, get_task_overrides
+
+        overrides = get_task_overrides()
+        if overrides:
+            cfg = type(cfg).model_validate(apply_overrides(cfg.model_dump(), overrides))
+    except Exception:
+        pass
+    run_id = resolve_run_id(
+        explicit=run_id,
+        from_input=(input_info or {}).get("run_id"),
+        from_config=getattr(cfg.run, "id", None),
+        from_env=get_run_id_env(),
+    )
 
     # PipelineController local step tasks default to auto_resource_monitoring=True (noisy on non-GPU envs).
     if os.environ.get("AUTO_ML_PIPELINE_ACTIVE") == "1":
@@ -42,12 +62,18 @@ def run_training_processing(
         "AUTO_ML_PARENT_TASK_ID": os.environ.get("AUTO_ML_PARENT_TASK_ID"),
         "AUTO_ML_DATASET_ID": os.environ.get("AUTO_ML_DATASET_ID"),
         "AUTO_ML_PREPROCESSED_DATASET_ID": os.environ.get("AUTO_ML_PREPROCESSED_DATASET_ID"),
+        "AUTO_ML_RUN_ID": os.environ.get("AUTO_ML_RUN_ID"),
     }
+    set_run_id_env(run_id)
 
     dataset_id = (input_info or {}).get("dataset_id")
 
-    os.environ.pop("CLEARML_TASK_ID", None)
-    os.environ["CLEARML_TASK_ID"] = ""
+    # When running inside an existing ClearML task (e.g., cloned/enqueued execution),
+    # CLEARML_TASK_ID is provided by the agent and must be preserved.
+    current_task_id = os.environ.get("CLEARML_TASK_ID")
+    if not (current_task_id and str(current_task_id).strip()):
+        os.environ.pop("CLEARML_TASK_ID", None)
+        os.environ["CLEARML_TASK_ID"] = ""
 
     parent_for_summary = parent_task_id or (input_info or {}).get("task_id")
     if parent_for_summary:
@@ -87,6 +113,7 @@ def run_training_processing(
         "dataset_id": dataset_id,
         "task_id": summary_task_id,
         "training_task_ids": training_task_ids,
+        "run_id": run_id,
     }
     if metrics is not None:
         ret["metrics"] = metrics

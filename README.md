@@ -50,6 +50,26 @@ cp clearml.conf.example clearml.conf
 ./.venv/bin/python -m automl_lib.cli.run_comparison     --config config_comparison.yaml --training-info outputs/training_info.json
 ```
 
+### Clone実行（テンプレTask複製）
+
+```bash
+./.venv/bin/python -m automl_lib.cli.run_clone --task-id <TEMPLATE_TASK_ID> --queue default --overrides overrides.yaml
+```
+
+### Clone実行（configで有効化）
+
+各 `run_<phase>` / `run_pipeline` は、config の `clearml.execution_mode: clone` が指定されている場合に
+テンプレTaskを複製して（必要ならenqueueして）終了します。
+
+```yaml
+clearml:
+  enabled: true
+  execution_mode: clone
+  template_task_id: "<TEMPLATE_TASK_ID>"
+  queue: "default"
+  run_tasks_locally: false   # false のとき queue を使って enqueue
+```
+
 ---
 
 ## 設定ファイル（同梱テンプレ）

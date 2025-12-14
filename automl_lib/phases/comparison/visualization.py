@@ -13,6 +13,23 @@ except Exception:  # pragma: no cover
 from automl_lib.clearml import report_plotly, report_table
 
 
+_MINIMIZE_METRICS = {
+    "mse",
+    "rmse",
+    "mae",
+    "mape",
+    "smape",
+    "logloss",
+    "loss",
+    "error",
+}
+
+
+def _metric_goal(metric: str) -> str:
+    key = str(metric).strip().lower()
+    return "min" if key in _MINIMIZE_METRICS else "max"
+
+
 def render_comparison_visuals(logger, metrics_df: pd.DataFrame, metric_cols=None) -> None:
     """
     logger: ClearML Logger
@@ -63,6 +80,58 @@ def render_comparison_visuals(logger, metrics_df: pd.DataFrame, metric_cols=None
                 title=f"{m.upper()} distribution",
             )
             report_plotly(logger, title=f"{m}_hist", series="comparison", figure=fig_hist)
+        except Exception:
+            pass
+
+        # モデル×前処理のヒートマップ（存在する場合のみ）
+        if "model" not in metrics_df.columns or "preprocessor" not in metrics_df.columns:
+            continue
+        try:
+            heat_src = metrics_df.copy()
+            heat_src[m] = pd.to_numeric(heat_src[m], errors="coerce")
+            heat_src = heat_src.dropna(subset=[m])
+            if heat_src.empty:
+                continue
+            pivot = heat_src.pivot_table(index="model", columns="preprocessor", values=m, aggfunc="mean")
+            if pivot is None or pivot.empty:
+                continue
+
+            goal = _metric_goal(m)
+            try:
+                if goal == "max":
+                    model_order = pivot.max(axis=1).sort_values(ascending=False).index
+                else:
+                    model_order = pivot.min(axis=1).sort_values(ascending=True).index
+                pivot = pivot.loc[model_order]
+            except Exception:
+                pass
+            try:
+                if goal == "max":
+                    preproc_order = pivot.max(axis=0).sort_values(ascending=False).index
+                else:
+                    preproc_order = pivot.min(axis=0).sort_values(ascending=True).index
+                pivot = pivot.loc[:, preproc_order]
+            except Exception:
+                pass
+
+            n_cells = int(pivot.shape[0] * pivot.shape[1])
+            text_auto = (n_cells <= 400)
+            try:
+                fig = px.imshow(
+                    pivot,
+                    aspect="auto",
+                    color_continuous_scale=("RdYlGn" if goal == "max" else "RdYlGn_r"),
+                    text_auto=text_auto,
+                    title=f"{m.upper()} heatmap (model x preprocessor)",
+                )
+            except TypeError:
+                fig = px.imshow(
+                    pivot,
+                    aspect="auto",
+                    color_continuous_scale=("RdYlGn" if goal == "max" else "RdYlGn_r"),
+                    title=f"{m.upper()} heatmap (model x preprocessor)",
+                )
+            report_plotly(logger, title=f"{m}_heatmap", series="comparison", figure=fig)
         except Exception:
             pass
 

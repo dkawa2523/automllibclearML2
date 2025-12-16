@@ -117,7 +117,7 @@ def _run_in_process_pipeline(
     preprocessing_config: Optional[Path],
     comparison_config: Optional[Path],
 ) -> Dict[str, Any]:
-    from automl_lib.phases import run_data_editing, run_data_registration, run_preprocessing, run_reporting, run_training
+    from automl_lib.phases import run_data_editing, run_data_registration, run_preprocessing, run_training
 
     preprocessing_cfg_path = preprocessing_config or config_path
     comparison_cfg_path = comparison_config or config_path
@@ -165,20 +165,12 @@ def _run_in_process_pipeline(
         input_info=preproc_info,
         comparison_config_path=(str(comparison_cfg_path) if embed_comparison else None),
     )
-    reporting_info = run_reporting(
-        config_path,
-        preprocessing_config_path=preprocessing_cfg_path,
-        preprocessing_info=preproc_info if isinstance(preproc_info, dict) else None,
-        training_info=training_info if isinstance(training_info, dict) else None,
-        run_id=run_id,
-    )
 
     ret.update(
         {
             "dataset_id": dataset_id_for_pipeline,
             "preprocessing": preproc_info,
             "training": training_info,
-            "reporting": reporting_info,
         }
     )
     return ret
@@ -236,7 +228,6 @@ def _run_clearml_pipeline_controller(
     from automl_lib.phases.data_registration.processing import run_data_registration_processing
     from automl_lib.phases.preprocessing.processing import run_preprocessing_processing
     from automl_lib.phases.training.processing import run_training_processing
-    from automl_lib.phases.reporting.processing import run_reporting_processing
 
     preprocessing_cfg_path = preprocessing_config or config_path
     comparison_cfg_path = comparison_config or config_path
@@ -369,23 +360,8 @@ def _run_clearml_pipeline_controller(
             execution_queue=_q("training"),
             function_return=["result"],
         )
-
-        pipe.add_function_step(
-            name="reporting",
-            parents=["training"],
-            function=run_reporting_processing,
-            function_kwargs={
-                "config_path": str(config_path),
-                "preprocessing_config_path": str(preprocessing_cfg_path),
-                "preprocessing_info": "${preprocessing.result}",
-                "training_info": "${training.result}",
-                "pipeline_task_id": str(pipe_task_id or ""),
-                "run_id": run_id,
-            },
-            execution_queue=_q("reporting"),
-            function_return=["result"],
-        )
-        last_step = "reporting"
+        last_step = "training"
+        last_result_expr = "${training.result}"
 
         if cfg.clearml.run_pipeline_locally and hasattr(pipe, "start_locally"):
             print("[PipelineController] starting locally (run_pipeline_locally=True)")

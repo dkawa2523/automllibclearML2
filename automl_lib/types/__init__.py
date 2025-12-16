@@ -1,3 +1,3 @@
-from .phase_io import ComparisonInfo, DatasetInfo, InferenceInfo, ReportingInfo, TrainingInfo
+from .phase_io import ComparisonInfo, DatasetInfo, InferenceInfo, TrainingInfo
 
-__all__ = ["DatasetInfo", "TrainingInfo", "ComparisonInfo", "ReportingInfo", "InferenceInfo"]
+__all__ = ["DatasetInfo", "TrainingInfo", "ComparisonInfo", "InferenceInfo"]

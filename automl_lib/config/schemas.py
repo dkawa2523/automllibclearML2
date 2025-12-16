@@ -26,7 +26,6 @@ class ClearMLAgentsConfig(_StrictBaseModel):
     data_editing: Optional[str] = None
     preprocessing: Optional[str] = None
     training: Optional[str] = None
-    reporting: Optional[str] = None
     inference: Optional[str] = None
     optimization: Optional[str] = None
     pipeline: Optional[str] = None
@@ -543,51 +542,6 @@ class VisualizationConfig(_StrictBaseModel):
     comparative_heatmap: bool = False
 
 
-class ReportingSettings(_StrictBaseModel):
-    # Number of candidates to show in the decision table (default: Top 5).
-    top_k: int = 5
-    # Limit number of rows used for reporting plots (avoid heavy UI).
-    max_plot_candidates: int = 200
-    include_failures: bool = True
-    max_failures_rows: int = 50
-    include_tradeoff_plots: bool = True
-    # When running remotely (no local outputs), try to resolve task ids/artifacts via ClearML API.
-    resolve_from_clearml: bool = True
-    # Add task/dataset links (requires ClearML API).
-    include_task_links: bool = True
-    # Reporting task project suffix under the main project.
-    project_suffix: str = "reports"
-
-    @field_validator("top_k")
-    @classmethod
-    def _check_top_k(cls, value: int) -> int:
-        if value < 1:
-            raise ValueError("reporting.top_k must be >= 1")
-        return value
-
-    @field_validator("max_plot_candidates")
-    @classmethod
-    def _check_max_plot_candidates(cls, value: int) -> int:
-        if value < 1:
-            raise ValueError("reporting.max_plot_candidates must be >= 1")
-        return value
-
-    @field_validator("max_failures_rows")
-    @classmethod
-    def _check_max_failures_rows(cls, value: int) -> int:
-        if value < 1:
-            raise ValueError("reporting.max_failures_rows must be >= 1")
-        return value
-
-    @field_validator("project_suffix")
-    @classmethod
-    def _check_project_suffix(cls, value: str) -> str:
-        s = str(value).strip()
-        if not s:
-            raise ValueError("reporting.project_suffix must be non-empty")
-        return s
-
-
 class TrainingConfig(_StrictBaseModel):
     run: RunSettings = Field(default_factory=RunSettings)
     data: DataSettings
@@ -600,7 +554,6 @@ class TrainingConfig(_StrictBaseModel):
     optimization: OptimizationConfig = Field(default_factory=OptimizationConfig)
     interpretation: InterpretationConfig = Field(default_factory=InterpretationConfig)
     visualizations: VisualizationConfig = Field(default_factory=VisualizationConfig)
-    reporting: ReportingSettings = Field(default_factory=ReportingSettings)
     clearml: Optional[ClearMLSettings] = None
 
     @model_validator(mode="after")

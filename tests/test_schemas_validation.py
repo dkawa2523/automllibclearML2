@@ -50,16 +50,15 @@ class TestSchemasValidation(unittest.TestCase):
         )
         self.assertTrue(cfg.models)
 
-    def test_training_config_accepts_reporting_section(self) -> None:
-        cfg = TrainingConfig.model_validate(
-            {
-                "data": {"dataset_id": "dummy"},
-                "models": [{"name": "ridge"}],
-                "reporting": {"top_k": 3, "include_task_links": False},
-            }
-        )
-        self.assertEqual(cfg.reporting.top_k, 3)
-        self.assertFalse(cfg.reporting.include_task_links)
+    def test_training_config_rejects_reporting_section(self) -> None:
+        with self.assertRaises(ValidationError):
+            TrainingConfig.model_validate(
+                {
+                    "data": {"dataset_id": "dummy"},
+                    "models": [{"name": "ridge"}],
+                    "reporting": {"top_k": 3, "include_task_links": False},
+                }
+            )
 
     def test_data_registration_requires_csv_path(self) -> None:
         with self.assertRaises(ValidationError):
@@ -80,4 +79,3 @@ class TestSchemasValidation(unittest.TestCase):
     def test_hidden_layer_sizes_normalization(self) -> None:
         spec = ModelSpec.model_validate({"name": "mlp", "params": {"hidden_layer_sizes": "(50, 100)"}})
         self.assertEqual(spec.params["hidden_layer_sizes"], [(50, 100)])
-

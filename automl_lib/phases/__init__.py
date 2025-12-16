@@ -18,7 +18,6 @@ __all__ = [
     "run_training",
     "run_inference",
     "run_comparison",
-    "run_reporting",
 ]
 
 
@@ -69,24 +68,3 @@ def run_comparison(
     from .comparison.processing import run_comparison_processing
 
     return run_comparison_processing(config_path, training_info=training_info, parent_task_id=parent_task_id)
-
-
-def run_reporting(
-    config_path,
-    *,
-    preprocessing_config_path=None,
-    preprocessing_info: Optional[Dict[str, Any]] = None,
-    training_info: Optional[Dict[str, Any]] = None,
-    pipeline_task_id: Optional[str] = None,
-    run_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    from .reporting.processing import run_reporting_processing
-
-    return run_reporting_processing(
-        config_path,
-        preprocessing_config_path=preprocessing_config_path,
-        preprocessing_info=preprocessing_info,
-        training_info=training_info,
-        pipeline_task_id=pipeline_task_id,
-        run_id=run_id,
-    )

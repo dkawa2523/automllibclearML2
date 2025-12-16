@@ -139,6 +139,24 @@ class ClearMLManager:
             except Exception:
                 self.logger = None
             self.enabled = True
+            # Tasks created with `Task.create()` start in "draft/created" status.
+            # Mark them as started so they appear as active/completed rather than Draft in the UI.
+            try:
+                st = ""
+                try:
+                    st = str(getattr(self.task, "get_status", lambda: "")() or "").strip().lower()
+                except Exception:
+                    st = ""
+                if st in {"draft", "created"}:
+                    try:
+                        self.task.mark_started(force=True)
+                    except Exception:
+                        try:
+                            self.task.started(ignore_errors=True, force=True)  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
+            except Exception:
+                pass
             try:
                 if hasattr(self.task, "set_name") and task_name:
                     self.task.set_name(str(task_name))
@@ -411,9 +429,18 @@ class ClearMLManager:
             try:
                 # Force completion if still running
                 status = getattr(self.task, "get_status", lambda: None)()
-                if status and str(status).lower() not in {"completed", "closed"}:
+                st = str(status or "").strip().lower() if status is not None else ""
+                if st in {"draft", "created"}:
                     try:
-                        self.task.mark_completed()
+                        self.task.mark_started(force=True)
+                    except Exception:
+                        try:
+                            self.task.started(ignore_errors=True, force=True)  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
+                if st and st not in {"completed", "closed"}:
+                    try:
+                        self.task.mark_completed(ignore_errors=True, force=True)
                     except Exception:
                         pass
                 self.task.close()

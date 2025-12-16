@@ -363,12 +363,28 @@ def run_automl(config_path: Path) -> None:
         if base_summary_name
         else task_name("training_summary", ctx)
     )
+    summary_task_obj = None
+    # In ClearML PipelineController steps, the step task lifecycle is owned by the controller.
+    # Create a dedicated training-summary task so users can find it under the normal project,
+    # while keeping the step task untouched.
+    if cfg.clearml and cfg.clearml.enabled and os.environ.get("AUTO_ML_PIPELINE_ACTIVE") == "1":
+        DatasetCls, OutputModelCls, TaskCls, TaskTypesCls = _import_clearml()
+        if TaskCls is not None and TaskTypesCls is not None:
+            try:
+                summary_task_obj = TaskCls.create(
+                    project_name=project_for_summary,
+                    task_name=summary_task_name,
+                    task_type=getattr(TaskTypesCls, "training", None),
+                )
+            except Exception:
+                summary_task_obj = None
     clearml_mgr = ClearMLManager(
         cfg.clearml,
         task_name=summary_task_name,
         task_type="training",
         default_project=project_for_summary,
         project=project_for_summary,
+        existing_task=summary_task_obj,
         extra_tags=build_tags(ctx, phase="training"),
     )
     summary_plots_mode = "best"
@@ -3111,8 +3127,16 @@ def run_automl(config_path: Path) -> None:
                 clearml_mgr.task.flush(wait_for_uploads=True)
         except Exception:
             pass
-        # パイプライン実行中は step wrapper が戻り値(artifact/param)を書き戻すため、ここでは閉じない
-        if os.environ.get("AUTO_ML_PIPELINE_ACTIVE") != "1":
+        # PipelineController owns the step task lifecycle, but training-summary can be a separate task.
+        # Close only when it is safe (non-step task) so it appears as completed in ClearML UI.
+        should_close = os.environ.get("AUTO_ML_PIPELINE_ACTIVE") != "1"
+        if not should_close and clearml_mgr.task:
+            step_task_id = (os.environ.get("CLEARML_TASK_ID") or "").strip()
+            try:
+                should_close = (not step_task_id) or (str(clearml_mgr.task.id) != step_task_id)
+            except Exception:
+                should_close = False
+        if should_close:
             clearml_mgr.close()
     metrics_for_comparison = model_task_records
     try:

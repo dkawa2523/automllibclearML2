@@ -1,9 +1,9 @@
 # automl_lib（ClearML連動 AutoML / Tabular）
 
 本リポジトリは、表形式データ向けの AutoML ワークフローを `automl_lib/` に集約したものです。  
-YAML設定ファイル駆動で、各フェーズの単独実行とパイプライン実行（preprocessing → training → reporting）を提供します。
+YAML設定ファイル駆動で、各フェーズの単独実行とパイプライン実行（preprocessing → training）を提供します。
 
-- フェーズ: `data_registration` / `data_editing` / `preprocessing` / `training` / `reporting` / `comparison`(manual) / `inference`
+- フェーズ: `data_registration` / `data_editing` / `preprocessing` / `training` / `comparison`(manual) / `inference`
 - 入力データ: 原則 **ClearML Dataset ID**（`data.dataset_id`）
 - 実行: `python -m automl_lib.cli.run_<phase> --config <yaml>`
 
@@ -47,7 +47,6 @@ cp clearml.conf.example clearml.conf
 ```bash
 ./.venv/bin/python -m automl_lib.cli.run_preprocessing --config config_preprocessing.yaml
 ./.venv/bin/python -m automl_lib.cli.run_training       --config config_training.yaml
-./.venv/bin/python -m automl_lib.cli.run_reporting      --config config.yaml --run-id <run_id>
 # 複数run横断の比較が必要な場合のみ
 ./.venv/bin/python -m automl_lib.cli.run_comparison     --config config_comparison.yaml --training-info outputs/training_info.json
 ```

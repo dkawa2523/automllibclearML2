@@ -151,24 +151,6 @@ interpretation:
   compute_shap: true
 
 # -----------------------------------------------------------------------------
-# REPORTING SETTINGS
-# -----------------------------------------------------------------------------
-reporting:
-  # TopK candidates to show in the report decision table
-  top_k: 5
-  # Limit number of candidates used for reporting plots (avoid heavy UI)
-  max_plot_candidates: 200
-  include_failures: true
-  max_failures_rows: 50
-  include_tradeoff_plots: true
-  # If running remotely (no local outputs), resolve artifacts via ClearML API
-  resolve_from_clearml: true
-  # Add task/dataset links (requires ClearML API)
-  include_task_links: true
-  # Reporting task will be created under "<project>/<project_suffix>" when possible
-  project_suffix: "reports"
-
-# -----------------------------------------------------------------------------
 # CLEARML SETTINGS (OPTIONAL)
 # -----------------------------------------------------------------------------
 clearml:
@@ -188,7 +170,7 @@ clearml:
   enable_optimization: false
   enable_pipeline: true
   # comparison_mode: disabled | embedded
-  # - embedded: training-summary/reporting に TopK/集計/ヒートマップ等を集約（推奨）
+  # - embedded: training-summary に TopK/集計/ヒートマップ等を集約（推奨）
   # - standalone 比較タスクは pipeline では作りません（必要なら run_comparison を手動実行）
   comparison_mode: "embedded"
   # training-summary へ転送する画像（none | best | all）
@@ -202,7 +184,6 @@ clearml:
   agents:
     preprocessing: null
     training: null
-    reporting: null
     inference: null
     optimization: null
     pipeline: null

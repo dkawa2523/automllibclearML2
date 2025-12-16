@@ -7,7 +7,10 @@ from .bootstrap import ensure_clearml_config_file
 from .context import generate_run_id
 
 
-_RUN_ID_BRACKET_RE = re.compile(r"\s*\[[0-9]{8}-[0-9]{6}-[0-9a-f]{6}\]\s*$", re.IGNORECASE)
+_RUN_ID_SUFFIX_RE = re.compile(
+    r"(?:\s*\[[0-9]{8}-[0-9]{6}-[0-9a-f]{6}\]\s*|\s*run:[0-9]{8}-[0-9]{6}-[0-9a-f]{6}\s*)$",
+    re.IGNORECASE,
+)
 
 
 def _dedupe_tags(tags: Iterable[str]) -> List[str]:
@@ -24,10 +27,10 @@ def _dedupe_tags(tags: Iterable[str]) -> List[str]:
 
 def _with_run_id_suffix(name: str, run_id: str) -> str:
     base = str(name or "").strip()
-    base = _RUN_ID_BRACKET_RE.sub("", base).strip()
+    base = _RUN_ID_SUFFIX_RE.sub("", base).strip()
     if not base:
         base = "cloned-task"
-    return f"{base} [{run_id}]"
+    return f"{base} run:{run_id}"
 
 
 def clone_task(

@@ -95,6 +95,147 @@ def plot_feature_importance(
     plt.close()
 
 
+def compute_shap_importance(
+    model_pipeline: object,
+    X: np.ndarray | pd.DataFrame,
+    *,
+    max_display: int = 20,
+    sample_size: int = 200,
+    random_state: int = 0,
+    max_features: int = 2000,
+    allow_kernel_explainer: bool = False,
+) -> Optional[pd.DataFrame]:
+    """Compute a SHAP feature-importance table (mean absolute SHAP per feature).
+
+    Returns a DataFrame with columns ['feature', 'shap_importance'] sorted descending.
+    This is intended for lightweight reporting (e.g., Plotly bar charts).
+    """
+
+    if shap is None:
+        return None
+
+    try:
+        preprocessor = model_pipeline.named_steps["preprocessor"]
+        model = model_pipeline.named_steps["model"]
+    except Exception:
+        return None
+
+    if isinstance(model, TransformedTargetRegressor):
+        model = getattr(model, "regressor_", getattr(model, "regressor", model))
+
+    # Sample rows to keep SHAP computation bounded.
+    X_sample = X
+    try:
+        if isinstance(X, pd.DataFrame):
+            n = int(min(sample_size, len(X)))
+            X_sample = X.sample(n=n, random_state=random_state) if n > 0 else X
+        else:
+            arr = np.asarray(X)
+            n = int(min(sample_size, arr.shape[0] if arr.ndim >= 1 else 0))
+            X_sample = arr[:n] if n > 0 else arr
+    except Exception:
+        X_sample = X
+
+    try:
+        X_trans = preprocessor.transform(X_sample)
+    except Exception:
+        return None
+
+    try:
+        n_features = int(X_trans.shape[1])  # type: ignore[attr-defined]
+    except Exception:
+        n_features = 0
+    if max_features and n_features and n_features > int(max_features):
+        return None
+
+    try:
+        import scipy.sparse as sp  # type: ignore
+
+        if sp.issparse(X_trans):  # type: ignore[attr-defined]
+            try:
+                n_features_sparse = int(X_trans.shape[1])  # type: ignore[attr-defined]
+            except Exception:
+                n_features_sparse = 0
+            if max_features and n_features_sparse and n_features_sparse > int(max_features):
+                return None
+            X_trans = X_trans.toarray()
+    except Exception:
+        pass
+
+    try:
+        feature_names = list(preprocessor.get_feature_names_out())
+    except Exception:
+        try:
+            n_features = int(X_trans.shape[1])
+        except Exception:
+            n_features = 0
+        feature_names = [f"f{i}" for i in range(n_features)]
+
+    shap_values = None
+    # Prefer TreeExplainer when possible (fast for tree models).
+    try:
+        explainer = shap.TreeExplainer(model)
+        shap_values = explainer.shap_values(X_trans)
+    except Exception:
+        shap_values = None
+
+    # Fallback: generic Explainer (if available) or KernelExplainer (slow).
+    if shap_values is None:
+        try:
+            explainer = shap.Explainer(model, X_trans)
+            explanation = explainer(X_trans)
+            shap_values = getattr(explanation, "values", None)
+        except Exception:
+            shap_values = None
+
+    if shap_values is None and allow_kernel_explainer:
+        try:
+            if hasattr(model, "predict_proba"):
+                explainer = shap.KernelExplainer(model.predict_proba, X_trans)
+            else:
+                explainer = shap.KernelExplainer(model.predict, X_trans)
+            shap_values = explainer.shap_values(X_trans)
+        except Exception:
+            shap_values = None
+
+    if shap_values is None:
+        return None
+
+    values = shap_values
+    if isinstance(values, list):
+        # Multi-class: list of arrays. Aggregate across classes.
+        try:
+            values_arr = np.sum([np.abs(np.asarray(v)) for v in values], axis=0)
+        except Exception:
+            try:
+                values_arr = np.asarray(values[0])
+            except Exception:
+                return None
+    else:
+        values_arr = np.asarray(values)
+        # Some explainers return (n_samples, n_features, n_outputs)
+        if values_arr.ndim == 3:
+            try:
+                values_arr = np.sum(np.abs(values_arr), axis=2)
+            except Exception:
+                return None
+
+    if values_arr.ndim != 2:
+        return None
+
+    try:
+        importances = np.nanmean(np.abs(values_arr), axis=0)
+    except Exception:
+        return None
+
+    if len(importances) != len(feature_names):
+        feature_names = [f"f{i}" for i in range(len(importances))]
+
+    df = pd.DataFrame({"feature": feature_names, "shap_importance": importances})
+    df = df.sort_values(by="shap_importance", ascending=False).head(max_display).reset_index(drop=True)
+    return df
+
+
 def plot_shap_summary(
     model_pipeline: object,
     X: np.ndarray | pd.DataFrame,
@@ -128,14 +269,28 @@ def plot_shap_summary(
         model = getattr(model, "regressor_", getattr(model, "regressor", model))
     # Transform data for SHAP explainer; use dense array
     X_trans = preprocessor.transform(X)
+    try:
+        n_features = int(X_trans.shape[1])  # type: ignore[attr-defined]
+    except Exception:
+        n_features = 0
+    if n_features and n_features > 2000:
+        raise RuntimeError(f"Too many features for SHAP summary: n_features={n_features}")
+    try:
+        import scipy.sparse as sp  # type: ignore
+
+        if sp.issparse(X_trans):  # type: ignore[attr-defined]
+            X_trans = X_trans.toarray()
+    except Exception:
+        pass
     # Use appropriate explainer
     if hasattr(model, "predict_proba"):
         # Classification; treat as tree if possible
         try:
             explainer = shap.TreeExplainer(model)
+            shap_values = explainer.shap_values(X_trans)
         except Exception:
-            explainer = shap.KernelExplainer(model.predict_proba, X_trans)
-        shap_values = explainer.shap_values(X_trans)
+            explainer = shap.Explainer(model, X_trans)
+            shap_values = explainer(X_trans).values
         # For multi‑class, sum absolute values across classes
         if isinstance(shap_values, list):
             shap_values = np.sum([np.abs(sv) for sv in shap_values], axis=0)
@@ -143,9 +298,10 @@ def plot_shap_summary(
         # Regression
         try:
             explainer = shap.TreeExplainer(model)
+            shap_values = explainer.shap_values(X_trans)
         except Exception:
-            explainer = shap.KernelExplainer(model.predict, X_trans)
-        shap_values = explainer.shap_values(X_trans)
+            explainer = shap.Explainer(model, X_trans)
+            shap_values = explainer(X_trans).values
     # Build feature names after preprocessing
     try:
         feature_names = preprocessor.get_feature_names_out()

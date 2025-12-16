@@ -6,7 +6,13 @@ from typing import Any, Dict, Optional
 
 from automl_lib.config.loaders import load_training_config
 from automl_lib.config.schemas import TrainingConfig
-from automl_lib.clearml.context import get_run_id_env, resolve_dataset_key, resolve_run_id, set_run_id_env
+from automl_lib.clearml.context import (
+    get_run_id_env,
+    resolve_dataset_key,
+    resolve_run_id,
+    sanitize_name_token,
+    set_run_id_env,
+)
 
 
 def run_pipeline(
@@ -111,8 +117,7 @@ def _run_in_process_pipeline(
     preprocessing_config: Optional[Path],
     comparison_config: Optional[Path],
 ) -> Dict[str, Any]:
-    from automl_lib.phases import run_data_editing, run_data_registration, run_preprocessing, run_training
-    from automl_lib.phases.comparison.processing import run_comparison_processing
+    from automl_lib.phases import run_data_editing, run_data_registration, run_preprocessing, run_reporting, run_training
 
     preprocessing_cfg_path = preprocessing_config or config_path
     comparison_cfg_path = comparison_config or config_path
@@ -151,25 +156,29 @@ def _run_in_process_pipeline(
     input_info.setdefault("dataset_id", dataset_id_for_pipeline)
     input_info.setdefault("csv_path", cfg.data.csv_path)
 
+    comparison_mode = getattr(cfg.clearml, "comparison_mode", "disabled") if cfg.clearml else None
+    embed_comparison = bool(comparison_mode == "embedded")
+
     preproc_info = run_preprocessing(preprocessing_cfg_path, input_info=input_info)
     training_info = run_training(
         config_path,
         input_info=preproc_info,
+        comparison_config_path=(str(comparison_cfg_path) if embed_comparison else None),
     )
-    comparison_info: Dict[str, Any] = {}
-    if not cfg.clearml or cfg.clearml.enable_comparison:
-        comparison_info = run_comparison_processing(
-            comparison_cfg_path,
-            training_info=training_info if isinstance(training_info, dict) else None,
-            parent_task_id=(training_info.get("task_id") if isinstance(training_info, dict) else None),
-        )
+    reporting_info = run_reporting(
+        config_path,
+        preprocessing_config_path=preprocessing_cfg_path,
+        preprocessing_info=preproc_info if isinstance(preproc_info, dict) else None,
+        training_info=training_info if isinstance(training_info, dict) else None,
+        run_id=run_id,
+    )
 
     ret.update(
         {
             "dataset_id": dataset_id_for_pipeline,
             "preprocessing": preproc_info,
             "training": training_info,
-            "comparison": comparison_info,
+            "reporting": reporting_info,
         }
     )
     return ret
@@ -227,7 +236,7 @@ def _run_clearml_pipeline_controller(
     from automl_lib.phases.data_registration.processing import run_data_registration_processing
     from automl_lib.phases.preprocessing.processing import run_preprocessing_processing
     from automl_lib.phases.training.processing import run_training_processing
-    from automl_lib.phases.comparison.processing import run_comparison_processing
+    from automl_lib.phases.reporting.processing import run_reporting_processing
 
     preprocessing_cfg_path = preprocessing_config or config_path
     comparison_cfg_path = comparison_config or config_path
@@ -238,16 +247,29 @@ def _run_clearml_pipeline_controller(
         csv_path=getattr(cfg.data, "csv_path", None),
     )
     base_pipeline_name = cfg.clearml.task_name or f"pipeline-{Path(config_path).stem}"
-    pipeline_name = f"{base_pipeline_name} [{dataset_key}] [{run_id}]"
+    # NOTE: ClearML PipelineController internally queries tasks by passing the name as a regex
+    # (without escaping), so characters like `[` / `]` can break the server-side regex parser.
+    # Keep the controller task name regex-safe and rely on tags/run_id for discoverability.
+    safe_base = sanitize_name_token(base_pipeline_name, max_len=64)
+    safe_run = sanitize_name_token(run_id, max_len=64)
+    safe_ds = sanitize_name_token(dataset_key, max_len=64)
+    pipeline_name = f"{safe_base} ds:{safe_ds} run:{safe_run}"
     project_name = cfg.clearml.project_name or "AutoML"
     print(f"[PipelineController] init controller name={pipeline_name} project={project_name}")
 
     try:
+        # Reduce overhead / avoid hangs from repo & requirements scanning in controller tasks.
+        os.environ.setdefault("CLEARML_SKIP_PIP_FREEZE", "1")
         pipe = PipelineController(
             name=pipeline_name,
             project=project_name,
             version="1.0",
         )
+        pipe_task_id = None
+        try:
+            pipe_task_id = pipe.task.id  # type: ignore[attr-defined]
+        except Exception:
+            pipe_task_id = None
 
         default_queue = _agent_queue(cfg.clearml, "pipeline") or cfg.clearml.queue
         controller_queue = cfg.clearml.services_queue or _agent_queue(cfg.clearml, "pipeline") or cfg.clearml.queue
@@ -329,34 +351,41 @@ def _run_clearml_pipeline_controller(
         last_step = "preprocessing"
         last_result_expr = "${preprocessing.result}"
 
+        comparison_mode = getattr(cfg.clearml, "comparison_mode", "disabled")
+
+        training_kwargs: Dict[str, Any] = {
+            "config_path": str(config_path),
+            "input_info": last_result_expr,
+            "run_id": run_id,
+        }
+        if comparison_mode == "embedded":
+            training_kwargs["comparison_config_path"] = str(comparison_cfg_path)
+
         pipe.add_function_step(
             name="training",
             parents=[last_step],
             function=run_training_processing,
-            function_kwargs={
-                "config_path": str(config_path),
-                "input_info": last_result_expr,
-                "run_id": run_id,
-            },
+            function_kwargs=training_kwargs,
             execution_queue=_q("training"),
             function_return=["result"],
         )
 
-        if not cfg.clearml.enable_comparison:
-            last_step = "training"
-        else:
-            pipe.add_function_step(
-                name="compare_results",
-                parents=["training"],
-                function=run_comparison_processing,
-                function_kwargs={
-                    "config_path": str(comparison_cfg_path),
-                    "training_info": "${training.result}",
-                    "run_id": run_id,
-                },
-                execution_queue=cfg.clearml.comparison_agent or default_queue or controller_queue,
-                function_return=["result"],
-            )
+        pipe.add_function_step(
+            name="reporting",
+            parents=["training"],
+            function=run_reporting_processing,
+            function_kwargs={
+                "config_path": str(config_path),
+                "preprocessing_config_path": str(preprocessing_cfg_path),
+                "preprocessing_info": "${preprocessing.result}",
+                "training_info": "${training.result}",
+                "pipeline_task_id": str(pipe_task_id or ""),
+                "run_id": run_id,
+            },
+            execution_queue=_q("reporting"),
+            function_return=["result"],
+        )
+        last_step = "reporting"
 
         if cfg.clearml.run_pipeline_locally and hasattr(pipe, "start_locally"):
             print("[PipelineController] starting locally (run_pipeline_locally=True)")
@@ -368,14 +397,9 @@ def _run_clearml_pipeline_controller(
             pipe.wait()
 
         print("[PipelineController] pipeline controller finished/queued successfully")
-        pipeline_task_id = None
-        try:
-            pipeline_task_id = pipe.task.id  # type: ignore[attr-defined]
-        except Exception:
-            pipeline_task_id = None
         return {
             "mode": "clearml_pipeline",
-            "pipeline_task_id": pipeline_task_id,
+            "pipeline_task_id": pipe_task_id,
             "dataset_id": dataset_id,
             "run_id": run_id,
         }

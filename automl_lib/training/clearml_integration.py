@@ -119,9 +119,10 @@ class ClearMLManager:
             seen.add(t)
             tags.append(t)
 
-        # If executing inside an existing ClearML task (e.g., cloned/enqueued execution),
-        # prefer reusing the current task for the top-level (parent=None) manager.
-        if existing_task is None and parent is None and self.enabled:
+        # If executing inside an existing ClearML task (e.g., cloned/enqueued execution
+        # or a PipelineController step), prefer reusing the current task to avoid
+        # creating orphan tasks and breaking the step lifecycle.
+        if existing_task is None and self.enabled:
             current_task_id = os.environ.get("CLEARML_TASK_ID")
             if current_task_id and str(current_task_id).strip():
                 _, _, Task, _ = _import_clearml()
@@ -138,9 +139,27 @@ class ClearMLManager:
             except Exception:
                 self.logger = None
             self.enabled = True
+            try:
+                if hasattr(self.task, "set_name") and task_name:
+                    self.task.set_name(str(task_name))
+            except Exception:
+                pass
+            if parent:
+                try:
+                    self.task.add_parent(parent)
+                except Exception:
+                    try:
+                        self.task.set_parent(parent)  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
             if tags:
                 try:
                     self.task.add_tags(tags)
+                except Exception:
+                    pass
+            if cfg and cfg.queue and not cfg.run_tasks_locally:
+                try:
+                    self.task.set_parameter("requested_queue", cfg.queue)
                 except Exception:
                     pass
             return

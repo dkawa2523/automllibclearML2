@@ -29,6 +29,13 @@ def _is_classification_like(y: pd.Series) -> bool:
         return True
 
 
+def _pref(prefix: str | None, title: str) -> str:
+    if not prefix:
+        return title
+    base = str(prefix).strip().strip("/")
+    return f"{base}/{title}" if base else title
+
+
 def render_preprocessing_visuals(
     logger,
     *,
@@ -39,6 +46,7 @@ def render_preprocessing_visuals(
     feature_types: Dict[str, List[str]],
     max_plot_rows: int = 10000,
     top_n: int = 20,
+    title_prefix: str | None = None,
 ) -> None:
     if not logger:
         return
@@ -60,15 +68,30 @@ def render_preprocessing_visuals(
                     vc = pd.concat([head, pd.Series({"Others": rest})])
                 df_counts = vc.reset_index()
                 df_counts.columns = ["class", "count"]
-                report_table(logger, title="target_distribution_table", df=df_counts, series="target")
+                report_table(
+                    logger,
+                    title=_pref(title_prefix, "01_target/target_distribution_table"),
+                    df=df_counts,
+                    series="target",
+                )
                 if px is not None:
                     fig = px.bar(df_counts, x="class", y="count", title="Target distribution (classification-like)")
-                    report_plotly(logger, title="target_distribution", series="target", figure=fig)
+                    report_plotly(
+                        logger,
+                        title=_pref(title_prefix, "01_target/target_distribution"),
+                        series="target",
+                        figure=fig,
+                    )
             else:
                 df_y = pd.DataFrame({"target": y_nonnull})
                 if px is not None:
                     fig = px.histogram(df_y, x="target", nbins=30, title="Target distribution (regression-like)")
-                    report_plotly(logger, title="target_distribution", series="target", figure=fig)
+                    report_plotly(
+                        logger,
+                        title=_pref(title_prefix, "01_target/target_distribution"),
+                        series="target",
+                        figure=fig,
+                    )
         except Exception:
             pass
 
@@ -88,7 +111,12 @@ def render_preprocessing_visuals(
                 miss_df_top = miss_df.head(top_n)
             else:
                 miss_df_top = miss_df
-            report_table(logger, title="missing_summary", df=miss_df_top, series="quality")
+            report_table(
+                logger,
+                title=_pref(title_prefix, "02_quality/missing_summary"),
+                df=miss_df_top,
+                series="quality",
+            )
             if px is not None and not miss_df_top.empty:
                 fig = px.bar(
                     miss_df_top[::-1],
@@ -97,7 +125,12 @@ def render_preprocessing_visuals(
                     orientation="h",
                     title="Missing rate by column (top)",
                 )
-                report_plotly(logger, title="missing_rate_top", series="quality", figure=fig)
+                report_plotly(
+                    logger,
+                    title=_pref(title_prefix, "02_quality/missing_rate_top"),
+                    series="quality",
+                    figure=fig,
+                )
     except Exception:
         pass
 
@@ -111,10 +144,15 @@ def render_preprocessing_visuals(
         if n_pre is not None:
             rows.append({"stage": "preprocessed", "n_features": n_pre})
         feat_df = pd.DataFrame(rows)
-        report_table(logger, title="feature_count", df=feat_df, series="summary")
+        report_table(logger, title=_pref(title_prefix, "03_features/feature_count"), df=feat_df, series="summary")
         if px is not None and not feat_df.empty:
             fig = px.bar(feat_df, x="stage", y="n_features", title="Number of features (raw vs preprocessed)")
-            report_plotly(logger, title="feature_count", series="summary", figure=fig)
+            report_plotly(
+                logger,
+                title=_pref(title_prefix, "03_features/feature_count"),
+                series="summary",
+                figure=fig,
+            )
     except Exception:
         pass
 
@@ -124,6 +162,6 @@ def render_preprocessing_visuals(
         if numeric_cols:
             cols = numeric_cols[: min(top_n, len(numeric_cols))]
             desc = df_raw[cols].describe().T.reset_index().rename(columns={"index": "column"})
-            report_table(logger, title="numeric_describe", df=desc, series="summary")
+            report_table(logger, title=_pref(title_prefix, "99_debug/numeric_describe"), df=desc, series="summary")
     except Exception:
         pass

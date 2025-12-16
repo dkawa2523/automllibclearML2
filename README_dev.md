@@ -99,13 +99,14 @@ pip install -r requirements-optional.txt
   --input-info outputs/preprocessing_info.json \
   --output-info outputs/training_info.json
 
-# 5) compare_results（training_task_ids を集計）
-./.venv/bin/python -m automl_lib.cli.run_comparison \
-  --config config_comparison.yaml \
+# 5) reporting（レポート: データ/前処理/推奨モデル/Top5意思決定表）
+./.venv/bin/python -m automl_lib.cli.run_reporting \
+  --config config.yaml \
+  --preprocessing-info outputs/preprocessing_info.json \
   --training-info outputs/training_info.json \
-  --output-info outputs/comparison_info.json
+  --output-info outputs/reporting_info.json
 
-# 複数runを横断比較したい場合（training_info を複数指定）
+# （任意）複数runを横断比較したい場合（training_info を複数指定）
 ./.venv/bin/python -m automl_lib.cli.run_comparison \
   --config config_comparison.yaml \
   --training-info outputs/run1/training_info.json \
@@ -167,6 +168,7 @@ pip install -r requirements-optional.txt
   - `DatasetInfo`: `dataset_id`, `task_id`, `csv_path`
   - `TrainingInfo`: `dataset_id`, `task_id`, `training_task_ids`, `metrics?`
   - `ComparisonInfo`: `task_id`, `artifacts[]`
+  - `ReportingInfo`: `task_id`, `report_md`, `output_dir`
 
 ### 4.3 フェーズ別の入出力（開発者が守ること）
 
@@ -176,7 +178,8 @@ pip install -r requirements-optional.txt
 | data_editing | `config_editing.yaml` + `DatasetInfo?(任意)` | `DatasetInfo` | 編集後CSV hash で重複検出し再利用 |
 | preprocessing | `config_preprocessing.yaml`（または `config.yaml`） + `DatasetInfo?(任意)` | `DatasetInfo` | **入力は既存ClearML Dataset ID が基本** |
 | training | `config_training.yaml`（または `config.yaml`） + `DatasetInfo?(任意)` | `TrainingInfo` | summary task + train_models 子タスク群 |
-| compare_results | `config_comparison.yaml`（または `config.yaml`） + `TrainingInfo` | `ComparisonInfo` | `comparison_metrics.csv` / `comparison_ranked.csv` / `best_result.json` / `best_by_model.*`（複数runなら `best_by_run.*` / `best_by_run_model.csv` / `model_summary.csv` / `win_summary.csv` / `recommended_model.json` + mean-by-model plot も。複数指標が揃う場合は `composite_score` 列も付与） |
+| reporting | `config.yaml` + `DatasetInfo/TrainingInfo` | `ReportingInfo` | `report.md`（データ概要/前処理要約/推奨モデル/Top5意思決定表）+ ClearML tables/text |
+| comparison（manual） | `config_comparison.yaml`（または `config.yaml`） + `TrainingInfo` | `ComparisonInfo` | 複数run横断の比較用途。`comparison_metrics.csv` / `comparison_ranked.csv` / `best_result.json` / `best_by_model.*` 等 |
 | inference | `inference_config.yaml` | `InferenceInfo` | 予測結果のCSV/画像パス・ClearML task id を返す |
 
 統一ルール（重要）:
@@ -336,10 +339,12 @@ preprocessing/comparison の出力ディレクトリ:
 | `clearml.enable_inference` | `bool` | inference を有効化（将来） |
 | `clearml.enable_optimization` | `bool` | optimization を有効化（将来） |
 | `clearml.enable_pipeline` | `bool` | pipeline 実行を有効化 |
-| `clearml.enable_comparison` | `bool` | compare_results を有効化 |
+| `clearml.comparison_mode` | `disabled|standalone|embedded` | 比較の集約方式（embedded=training-summary/reportingに集約。standalone比較タスクは手動実行） |
+| `clearml.summary_plots` | `none|best|all` | training-summary へ転送する画像（best推奨） |
+| `clearml.recommendation_mode` | `auto|training|comparison` | 推奨モデルの選び方（auto推奨） |
 | `clearml.comparison_metrics` | `list[str]` | comparison で集計する指標 |
 | `clearml.comparison_task_name` | `str?` | comparison タスク名 |
-| `clearml.comparison_agent` | `str?` | comparison step のキュー上書き |
+| `clearml.comparison_agent` | `str?` | legacy（未使用。フェーズ別キューは `clearml.agents.*` を利用） |
 | `clearml.agents.*` | `str?` | フェーズ別キュー（未設定は `clearml.queue` を利用） |
 
 ### 5.12 comparison: `ranking.*`（比較/選定）
@@ -368,7 +373,7 @@ preprocessing/comparison の出力ディレクトリ:
 
 ## 6. Mermaid: 全体フロー / フェーズフロー / ClearML受け渡し
 
-### 6.1 全体フロー（推奨: registration/editing は独立、pipeline は preprocessing→training→compare）
+### 6.1 全体フロー（推奨: registration/editing は独立、pipeline は preprocessing→training→reporting）
 
 ```mermaid
 flowchart LR
@@ -382,7 +387,8 @@ flowchart LR
   P --> DS_PRE[(ClearML Dataset: preprocessed)]
   DS_PRE --> T[training]
   T --> TM[train_models child tasks]
-  T --> C[compare_results]
+  T --> RPT[reporting]
+  T -. manual .-> C[comparison]
 
   DS_EDIT -. replace .-> DS_IN
   DS_RAW -. replace .-> DS_IN
@@ -390,7 +396,7 @@ flowchart LR
   classDef ds fill:#EFEFEF,stroke:#333,stroke-width:1px;
   classDef task fill:#DCF0FF,stroke:#333,stroke-width:1px;
   class DS_RAW,DS_EDIT,DS_IN,DS_PRE ds;
-  class R,E,P,T,TM,C task;
+  class R,E,P,T,TM,RPT,C task;
 ```
 
 ### 6.2 data_registration
@@ -445,7 +451,7 @@ flowchart TD
   H --> I[TrainingInfo(task_id, training_task_ids, metrics)]
 ```
 
-### 6.6 compare_results（training_infoがあればそれを優先）
+### 6.6 comparison（manual: training_info があればそれを優先）
 
 ```mermaid
 flowchart TD
@@ -469,7 +475,8 @@ flowchart LR
   ds_in -->|preprocessing| ds_pre[(Dataset: preprocessed_dataset_id)]
   ds_pre -->|training| task_train[(Task: training-summary)]
   task_train --> task_children[(Tasks: train_models/*)]
-  task_train -->|compare_results| task_cmp[(Task: comparison)]
+  task_train -->|reporting| task_rpt[(Task: reporting)]
+  task_train -. manual .-> task_cmp[(Task: comparison)]
 ```
 
 ---

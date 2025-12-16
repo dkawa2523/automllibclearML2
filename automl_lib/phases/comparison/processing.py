@@ -11,7 +11,13 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import pandas as pd
 
 from automl_lib.clearml import disable_resource_monitoring
-from automl_lib.clearml.context import get_run_id_env, resolve_dataset_key, resolve_run_id, set_run_id_env
+from automl_lib.clearml.context import (
+    get_run_id_env,
+    resolve_dataset_key,
+    resolve_run_id,
+    run_scoped_output_dir,
+    set_run_id_env,
+)
 from automl_lib.clearml.logging import report_scalar, report_table
 from automl_lib.config.loaders import load_comparison_config
 from automl_lib.phases.comparison.clearml_integration import create_comparison_task, finalize_comparison_task
@@ -228,7 +234,8 @@ def run_comparison_processing(
                     enriched["run_task_id"] = str(run_parent_id)
             rows.append(enriched)
 
-    output_dir = Path(cfg.output.output_dir)
+    base_output_dir = Path(cfg.output.output_dir)
+    output_dir = run_scoped_output_dir(base_output_dir, run_id)
     meta = build_comparison_metadata(
         rows,
         output_dir=output_dir,
@@ -321,7 +328,7 @@ def run_comparison_processing(
             except Exception:
                 pass
 
-        render_comparison_visuals(logger, ranked_for_vis, metric_cols=desired_metrics)
+        render_comparison_visuals(logger, ranked_for_vis, metric_cols=desired_metrics, title_prefix="02_leaderboard")
 
         best = meta.get("best") or {}
         if isinstance(best, dict):
@@ -368,21 +375,23 @@ def run_comparison_processing(
 
         if isinstance(meta.get("best_by_group_df"), pd.DataFrame):
             try:
-                report_table(logger, title="best_by_run", df=meta["best_by_group_df"], series="best_by_run")
+                report_table(logger, title="01_overview/best_by_run", df=meta["best_by_group_df"], series="best_by_run")
             except Exception:
                 pass
         if isinstance(meta.get("best_by_model_df"), pd.DataFrame):
             try:
-                report_table(logger, title="best_by_model", df=meta["best_by_model_df"], series="best_by_model")
+                report_table(
+                    logger, title="01_overview/best_by_model", df=meta["best_by_model_df"], series="best_by_model"
+                )
             except Exception:
                 pass
         if isinstance(meta.get("win_summary_df"), pd.DataFrame):
             try:
-                report_table(logger, title="win_summary", df=meta["win_summary_df"], series="summary")
+                report_table(logger, title="01_overview/win_summary", df=meta["win_summary_df"], series="summary")
             except Exception:
                 pass
             try:
-                render_win_summary_visuals(logger, meta["win_summary_df"])
+                render_win_summary_visuals(logger, meta["win_summary_df"], title_prefix="01_overview")
             except Exception:
                 pass
         if isinstance(meta.get("model_summary_df"), pd.DataFrame):
@@ -390,7 +399,7 @@ def run_comparison_processing(
             if isinstance(best, dict):
                 metric = best.get("primary_metric")
             metric = str(metric or primary_metric or (desired_metrics[0] if desired_metrics else "rmse")).strip().lower()
-            render_model_summary_visuals(logger, meta["model_summary_df"], primary_metric=metric)
+            render_model_summary_visuals(logger, meta["model_summary_df"], primary_metric=metric, title_prefix="01_overview")
         if isinstance(meta.get("recommended_model"), dict):
             try:
                 rec = meta.get("recommended_model") or {}
@@ -402,7 +411,7 @@ def run_comparison_processing(
                     row.setdefault("primary_metric", rec.get("primary_metric"))
                     row.setdefault("goal", rec.get("goal"))
                 if row:
-                    report_table(logger, title="recommended_model", df=pd.DataFrame([row]), series="summary")
+                    report_table(logger, title="01_overview/recommended_model", df=pd.DataFrame([row]), series="summary")
             except Exception:
                 pass
 
@@ -504,16 +513,28 @@ def _collect_metrics_from_tasks(task_ids: List[str], metric_names: List[str]) ->
             model = name.split(" - ")[0]
             preproc = name.split(" - ")[1]
         else:
-            # New naming: "train [<preproc>] [<model>] [<run_id>]" or "train [<model>] [<run_id>]"
+            # Current naming: "train ds:<...> pre:<...> model:<...> run:<...>"
+            # Legacy naming: "train [<preproc>] [<model>] [<run_id>]" or "train [<model>] [<run_id>]"
             try:
                 lowered = str(name).strip().lower()
                 if lowered.startswith("train "):
-                    parts = re.findall(r"\\[([^\\]]+)\\]", str(name))
-                    if len(parts) == 2:
-                        model = parts[0]
-                    elif len(parts) >= 3:
-                        preproc = parts[0]
-                        model = parts[1]
+                    tokens = str(name).strip().split()
+                    for tok in tokens:
+                        if tok.startswith("model:"):
+                            cand = tok.split("model:", 1)[1].strip()
+                            if cand:
+                                model = cand
+                        elif tok.startswith("pre:"):
+                            cand = tok.split("pre:", 1)[1].strip()
+                            if cand:
+                                preproc = cand
+                    if (not preproc) and (not model or model == name):
+                        parts = re.findall(r"\\[([^\\]]+)\\]", str(name))
+                        if len(parts) == 2:
+                            model = parts[0]
+                        elif len(parts) >= 3:
+                            preproc = parts[0]
+                            model = parts[1]
             except Exception:
                 pass
         row = {"task_id": tid, "task_name": name, "model": model, "preprocessor": preproc}

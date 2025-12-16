@@ -58,6 +58,16 @@ def _suppress_noisy_warnings() -> None:
     except Exception:
         pass
 
+    # Optional dependencies can emit noisy deprecation warnings (not actionable for end users).
+    try:
+        warnings.filterwarnings(
+            "ignore",
+            message=r"Please import `spmatrix` from the `scipy\.sparse` namespace.*",
+            category=DeprecationWarning,
+        )
+    except Exception:
+        pass
+
 
 def ensure_clearml_config_file() -> None:
     """

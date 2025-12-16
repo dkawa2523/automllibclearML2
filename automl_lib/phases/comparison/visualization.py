@@ -30,7 +30,21 @@ def _metric_goal(metric: str) -> str:
     return "min" if key in _MINIMIZE_METRICS else "max"
 
 
-def render_comparison_visuals(logger, metrics_df: pd.DataFrame, metric_cols=None) -> None:
+def _pref(title_prefix: str | None, name: str) -> str:
+    if not title_prefix:
+        return name
+    base = str(title_prefix).strip().strip("/")
+    return f"{base}/{name}" if base else name
+
+
+def render_comparison_visuals(
+    logger,
+    metrics_df: pd.DataFrame,
+    metric_cols=None,
+    *,
+    title_prefix: str | None = None,
+    series: str = "comparison",
+) -> None:
     """
     logger: ClearML Logger
     metrics_df: DataFrame with columns ['model', 'preprocessor', 'task_id', ...metrics]
@@ -46,7 +60,7 @@ def render_comparison_visuals(logger, metrics_df: pd.DataFrame, metric_cols=None
 
     # テーブルをそのまま送る（ランキング済みの場合もあるので先頭を確認しやすくする）
     try:
-        report_table(logger, title="comparison_metrics", df=metrics_df)
+        report_table(logger, title=_pref(title_prefix, "metrics"), df=metrics_df, series=series)
     except Exception:
         pass
 
@@ -67,7 +81,7 @@ def render_comparison_visuals(logger, metrics_df: pd.DataFrame, metric_cols=None
                 barmode="group" if has_run else "relative",
                 title=f"{m.upper()} by model",
             )
-            report_plotly(logger, title=f"{m}_bar", series="comparison", figure=fig_bar)
+            report_plotly(logger, title=_pref(title_prefix, f"{m}_bar"), series=series, figure=fig_bar)
         except Exception:
             pass
         # メトリクスヒストグラム
@@ -79,7 +93,7 @@ def render_comparison_visuals(logger, metrics_df: pd.DataFrame, metric_cols=None
                 marginal="box",
                 title=f"{m.upper()} distribution",
             )
-            report_plotly(logger, title=f"{m}_hist", series="comparison", figure=fig_hist)
+            report_plotly(logger, title=_pref(title_prefix, f"{m}_hist"), series=series, figure=fig_hist)
         except Exception:
             pass
 
@@ -131,12 +145,19 @@ def render_comparison_visuals(logger, metrics_df: pd.DataFrame, metric_cols=None
                     color_continuous_scale=("RdYlGn" if goal == "max" else "RdYlGn_r"),
                     title=f"{m.upper()} heatmap (model x preprocessor)",
                 )
-            report_plotly(logger, title=f"{m}_heatmap", series="comparison", figure=fig)
+            report_plotly(logger, title=_pref(title_prefix, f"{m}_heatmap"), series=series, figure=fig)
         except Exception:
             pass
 
 
-def render_model_summary_visuals(logger, model_summary_df: pd.DataFrame, *, primary_metric: str) -> None:
+def render_model_summary_visuals(
+    logger,
+    model_summary_df: pd.DataFrame,
+    *,
+    primary_metric: str,
+    title_prefix: str | None = None,
+    series: str = "comparison",
+) -> None:
     if model_summary_df is None or model_summary_df.empty:
         return
     if px is None:
@@ -149,7 +170,7 @@ def render_model_summary_visuals(logger, model_summary_df: pd.DataFrame, *, prim
         return
 
     try:
-        report_table(logger, title="model_summary", df=model_summary_df, series="summary")
+        report_table(logger, title=_pref(title_prefix, "model_summary"), df=model_summary_df, series=series)
     except Exception:
         pass
 
@@ -161,12 +182,18 @@ def render_model_summary_visuals(logger, model_summary_df: pd.DataFrame, *, prim
             error_y=(std_col if std_col in model_summary_df.columns else None),
             title=f"{metric.upper()} mean by model",
         )
-        report_plotly(logger, title=f"{metric}_mean_by_model", series="summary", figure=fig)
+        report_plotly(logger, title=_pref(title_prefix, f"{metric}_mean_by_model"), series=series, figure=fig)
     except Exception:
         pass
 
 
-def render_win_summary_visuals(logger, win_summary_df: pd.DataFrame) -> None:
+def render_win_summary_visuals(
+    logger,
+    win_summary_df: pd.DataFrame,
+    *,
+    title_prefix: str | None = None,
+    series: str = "comparison",
+) -> None:
     if win_summary_df is None or win_summary_df.empty:
         return
     if px is None:
@@ -181,7 +208,7 @@ def render_win_summary_visuals(logger, win_summary_df: pd.DataFrame) -> None:
             y="n_wins",
             title="Win count by model",
         )
-        report_plotly(logger, title="win_count_by_model", series="summary", figure=fig)
+        report_plotly(logger, title=_pref(title_prefix, "win_count_by_model"), series=series, figure=fig)
     except Exception:
         pass
 
@@ -193,6 +220,6 @@ def render_win_summary_visuals(logger, win_summary_df: pd.DataFrame) -> None:
                 y="win_rate",
                 title="Win rate by model",
             )
-            report_plotly(logger, title="win_rate_by_model", series="summary", figure=fig)
+            report_plotly(logger, title=_pref(title_prefix, "win_rate_by_model"), series=series, figure=fig)
         except Exception:
             pass

@@ -26,6 +26,7 @@ class ClearMLAgentsConfig(_StrictBaseModel):
     data_editing: Optional[str] = None
     preprocessing: Optional[str] = None
     training: Optional[str] = None
+    reporting: Optional[str] = None
     inference: Optional[str] = None
     optimization: Optional[str] = None
     pipeline: Optional[str] = None
@@ -57,6 +58,16 @@ class ClearMLSettings(_StrictBaseModel):
     run_pipeline_locally: bool = True
     tags: List[str] = Field(default_factory=list)
     naming: ClearMLNamingConfig = Field(default_factory=ClearMLNamingConfig)
+    # What to show on the training-summary task under "Plots"
+    # - none: do not mirror per-model plots to summary
+    # - best: show only recommended model plots (default)
+    # - all: show plots for all model tasks (can get noisy)
+    summary_plots: Literal["none", "best", "all"] = "best"
+    # How to choose the "recommended model" for the training-summary dashboard:
+    # - auto: use comparison ranking when embedded, else training primary metric
+    # - training: always use training primary metric (evaluation.primary_metric)
+    # - comparison: always use comparison ranking (ranking.primary_metric, incl. composite_score)
+    recommendation_mode: Literal["auto", "training", "comparison"] = "auto"
     # Clone execution mode (Phase 3). When "clone", callers may clone template_task_id instead of creating a new task.
     execution_mode: Literal["new", "clone"] = "new"
     template_task_id: Optional[str] = None
@@ -72,13 +83,47 @@ class ClearMLSettings(_StrictBaseModel):
     enable_inference: bool = False
     enable_optimization: bool = False
     enable_pipeline: bool = False
+    # Comparison execution mode:
+    # - disabled: do not run comparison (or embed it)
+    # - standalone: run a separate comparison task/step
+    # - embedded: report comparison-style aggregations into training-summary and skip standalone comparison
+    comparison_mode: Literal["disabled", "standalone", "embedded"] = "disabled"
+    # Legacy flags (kept for backward compatibility; normalized by validator below).
     enable_comparison: bool = False
+    embed_comparison_in_training_summary: bool = False
 
     comparison_agent: Optional[str] = None
     comparison_metrics: List[str] = Field(default_factory=list)
     comparison_task_name: Optional[str] = None
 
     agents: ClearMLAgentsConfig = Field(default_factory=ClearMLAgentsConfig)
+
+    @model_validator(mode="after")
+    def _normalize_comparison_mode(self) -> "ClearMLSettings":
+        # If user explicitly set comparison_mode, it takes precedence.
+        fields_set = getattr(self, "model_fields_set", set())
+        if "comparison_mode" not in fields_set:
+            if self.enable_comparison:
+                self.comparison_mode = "embedded" if self.embed_comparison_in_training_summary else "standalone"
+            else:
+                self.comparison_mode = "disabled"
+
+        mode = str(self.comparison_mode or "disabled").strip().lower()
+        if mode not in {"disabled", "standalone", "embedded"}:
+            raise ValueError("clearml.comparison_mode must be one of: disabled, standalone, embedded")
+
+        if mode == "disabled":
+            self.enable_comparison = False
+            self.embed_comparison_in_training_summary = False
+        elif mode == "standalone":
+            self.enable_comparison = True
+            self.embed_comparison_in_training_summary = False
+        else:  # embedded
+            self.enable_comparison = True
+            self.embed_comparison_in_training_summary = True
+
+        self.comparison_mode = mode  # normalize casing
+        return self
 
 
 class DataSettings(_StrictBaseModel):
@@ -112,7 +157,11 @@ class DataSettings(_StrictBaseModel):
 
 class EditingSettings(_StrictBaseModel):
     enable: bool = True
+    # Legacy: full output path. Takes precedence over output_dir/output_filename when set.
     output_path: Optional[str] = None
+    # Preferred: base output directory (will be run-scoped unless already scoped).
+    output_dir: Optional[str] = None
+    output_filename: str = "edited.csv"
     drop_columns: List[str] = Field(default_factory=list)
     rename_columns: Dict[str, str] = Field(default_factory=dict)
     fillna: Optional[Any] = None
@@ -494,6 +543,51 @@ class VisualizationConfig(_StrictBaseModel):
     comparative_heatmap: bool = False
 
 
+class ReportingSettings(_StrictBaseModel):
+    # Number of candidates to show in the decision table (default: Top 5).
+    top_k: int = 5
+    # Limit number of rows used for reporting plots (avoid heavy UI).
+    max_plot_candidates: int = 200
+    include_failures: bool = True
+    max_failures_rows: int = 50
+    include_tradeoff_plots: bool = True
+    # When running remotely (no local outputs), try to resolve task ids/artifacts via ClearML API.
+    resolve_from_clearml: bool = True
+    # Add task/dataset links (requires ClearML API).
+    include_task_links: bool = True
+    # Reporting task project suffix under the main project.
+    project_suffix: str = "reports"
+
+    @field_validator("top_k")
+    @classmethod
+    def _check_top_k(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("reporting.top_k must be >= 1")
+        return value
+
+    @field_validator("max_plot_candidates")
+    @classmethod
+    def _check_max_plot_candidates(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("reporting.max_plot_candidates must be >= 1")
+        return value
+
+    @field_validator("max_failures_rows")
+    @classmethod
+    def _check_max_failures_rows(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("reporting.max_failures_rows must be >= 1")
+        return value
+
+    @field_validator("project_suffix")
+    @classmethod
+    def _check_project_suffix(cls, value: str) -> str:
+        s = str(value).strip()
+        if not s:
+            raise ValueError("reporting.project_suffix must be non-empty")
+        return s
+
+
 class TrainingConfig(_StrictBaseModel):
     run: RunSettings = Field(default_factory=RunSettings)
     data: DataSettings
@@ -506,6 +600,7 @@ class TrainingConfig(_StrictBaseModel):
     optimization: OptimizationConfig = Field(default_factory=OptimizationConfig)
     interpretation: InterpretationConfig = Field(default_factory=InterpretationConfig)
     visualizations: VisualizationConfig = Field(default_factory=VisualizationConfig)
+    reporting: ReportingSettings = Field(default_factory=ReportingSettings)
     clearml: Optional[ClearMLSettings] = None
 
     @model_validator(mode="after")

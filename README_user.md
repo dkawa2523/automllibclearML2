@@ -38,7 +38,7 @@ cp clearml.conf.example clearml.conf
   - 任意: pipeline 前段で `data_registration` / `data_editing` の設定YAMLを指定する場合:
     - `--datareg-config config_dataregit.yaml`
     - `--editing-config config_editing.yaml`
-  - 任意: pipeline の preprocessing / compare_results の設定YAMLを指定する場合:
+  - 任意: pipeline の preprocessing / （embedded比較のランキング設定）の設定YAMLを指定する場合:
     - `--preproc-config config_preprocessing.yaml`
     - `--comparison-config config_comparison.yaml`
 - データ登録のみ（重複チェック: CSVハッシュ）  
@@ -49,6 +49,9 @@ cp clearml.conf.example clearml.conf
   `python -m automl_lib.cli.run_preprocessing --config config_preprocessing.yaml`
 - 学習フェーズのみ  
   `python -m automl_lib.cli.run_training --config config_training.yaml`
+- レポートのみ（データ/前処理/推奨モデル/Top5意思決定表を集約。再生成したい場合）  
+  `python -m automl_lib.cli.run_reporting --config config.yaml --run-id <run_id>`
+  - task_id を直接指定したい場合: `--preprocessing-task-id <id>` / `--training-task-id <id>`
 - 比較フェーズのみ（各学習タスクIDの集計・Plotly可視化を実行）  
   `python -m automl_lib.cli.run_comparison --config config_comparison.yaml --training-info training_info.json`
   - 複数runを横断比較する場合（repeatable）:
@@ -57,7 +60,7 @@ cp clearml.conf.example clearml.conf
   `python -m automl_lib.cli.run_inference --config inference_config.yaml`
 
 ※ 全CLIで実行前に pydantic による設定バリデーション、`CLEARML_TASK_ID` クリアを行い、毎回新規タスクを作成します（必要に応じて `--output-info` で結果JSONを保存可能）。  
-※ `config.yaml` を `run_preprocessing` / `run_comparison` に渡しても動作します（必要キーだけ抽出してバリデーションします）。
+※ `config.yaml` を `run_preprocessing` / `run_reporting` / `run_comparison` に渡しても動作します（必要キーだけ抽出してバリデーションします）。
 
 ---
 
@@ -80,7 +83,10 @@ cp clearml.conf.example clearml.conf
 | clearml | services_queue | パイプラインコントローラ用キュー（任意） |
 | clearml | enable_pipeline | PipelineControllerを使うか |
 | clearml | run_pipeline_locally | Trueならローカルでパイプライン実行 |
-| clearml | enable_comparison | 学習結果比較フェーズを有効にするか |
+| clearml | comparison_mode | 比較の集約方式（`disabled` / `embedded` 推奨。※pipelineは比較タスクを作らず reporting タスクを作ります） |
+| clearml | summary_plots | training-summary へ転送する画像（`none` / `best` / `all`） |
+| clearml | recommendation_mode | 推奨モデルの選び方（`auto` / `training` / `comparison`） |
+| reporting | top_k / include_tradeoff_plots | レポートのTopKと意思決定用trade-off可視化 |
 | preprocessing | numeric_imputation / categorical_imputation / scaling / categorical_encoding | 前処理戦略 |
 | models | name / params | 使用モデル名とハイパラ（複数可） |
 | cross_validation | n_folds / shuffle / random_seed | CV設定 |
@@ -88,10 +94,12 @@ cp clearml.conf.example clearml.conf
 
 補足:
 
-- preprocessing の出力は `outputs/preprocessing`（デフォルト）
-- compare_results の出力は `outputs/comparison`（デフォルト）
-- 変更したい場合は `config_preprocessing.yaml` / `config_comparison.yaml` を使う
-- compare_results のランキング/複合スコアは `config_comparison.yaml` の `ranking.*` で制御できる（例: `primary_metric=composite_score`, `composite.weights`）
+- data_editing の出力は `outputs/data_editing/<run_id>`（デフォルト。`editing.output_dir`/`editing.output_filename` で変更可。`editing.output_path` 指定時はそちら優先）
+- preprocessing の出力は `outputs/preprocessing/<run_id>`（デフォルト）
+- training の出力は `outputs/train/<run_id>`（デフォルト）
+- reporting の出力は `outputs/reporting/<run_id>`（デフォルト）
+- `config_comparison.yaml` のランキング/複合スコアは `clearml.comparison_mode: embedded` の場合に training-summary/reporting の集約内容に反映されます（例: `primary_metric=composite_score`, `composite.weights`）
+- 互換維持のため `clearml.enable_comparison` / `clearml.embed_comparison_in_training_summary` も動作しますが、今後は `clearml.comparison_mode` を推奨します
 
 ### 推論用 inference_config.yaml（抜粋）
 | セクション | キー | 説明 |
@@ -114,7 +122,7 @@ cp clearml.conf.example clearml.conf
 | models | name, enable, params | 1モデルにつき1エントリ。paramsはgrid/random/bayesianの探索空間 |
 | optimization | method, n_iter | `grid`=全探索、`random`/`bayesian`=Optuna系探索 |
 | evaluation | primary_metric | 最良モデルの決定指標。未指定時は regression=r2, classification=accuracy |
-| clearml | enable_pipeline / enable_comparison | PipelineControllerと比較タスクの有効/無効 |
+| clearml | enable_pipeline / comparison_mode | PipelineControllerの有効化 + 比較集約（`embedded`/`disabled`。`standalone`比較は手動実行） |
 | clearml.agents | preprocessing/training/inference/pipeline | 各フェーズの実行キュー。未設定ならqueueを使用 |
 | inference.input | mode | `csv`=一括推論、`params`=範囲探索/最適化 |
 | inference.search | method/n_trials/goal | Optunaのサンプラーと目的方向 |
@@ -123,10 +131,10 @@ cp clearml.conf.example clearml.conf
 | フェーズ | 主入力 | 主出力 | 主要設定キー |
 |----------|--------|--------|--------------|
 | データ登録 | data.csv_path / data.dataset_id | raw_dataset_id (ClearML) | clearml.register_raw_dataset |
-| データ編集 | raw_dataset_id / CSV | edited_dataset_id / edited.csv | editing.* |
+| データ編集 | raw_dataset_id / CSV | edited_dataset_id / `outputs/data_editing/<run_id>/edited.csv` | editing.* |
 | 前処理 | data.dataset_id (既存Dataset) | preprocessed_dataset_id / preprocessed_features.csv | preprocessing.* |
 | 学習 | preprocessed_dataset_id or CSV | models/*.joblib, metrics/results_summary.csv, training tasks | models, optimization, evaluation, output.* |
-| 比較 | training_task_ids | comparison task + CSV/JSON artifacts | clearml.enable_comparison, clearml.comparison_metrics, clearml.comparison_agent |
+| レポート | preprocessing + training 結果 | reporting task + `outputs/reporting/<run_id>/report.md` | reporting.*, clearml.enable_pipeline, clearml.comparison_mode(embedded), clearml.agents.reporting |
 | 推論 | model_dir or InputModel IDs | 予測CSV/Plotly/Artifacts | inference.input/search/output_dir |
 | パイプライン | config.yaml | PipelineController task（ClearML） | clearml.enable_pipeline, clearml.run_pipeline_locally, clearml.services_queue |
 
@@ -147,10 +155,8 @@ flowchart LR
     E -- Yes --> P[preprocessing]
     S --> P
     P --> T[training]
-    T --> U{enable_comparison?}
-    U -- Yes --> V[compare_results]
-    T --> W[Outputs/Artifacts]
-    V --> W
+    T --> RPT[reporting]
+    RPT --> W[Outputs/Artifacts]
 ```
 
 ### データ登録フェーズ
@@ -219,7 +225,7 @@ flowchart LR
     pre --> ds_pre[Dataset: preprocessed_dataset_id]
     ds_pre --> train_task[Task: training-summary]
     train_task --> model_tasks[Task: train_<model>...]
-    train_task --> compare_task[Task: comparison (analysis)]
+    train_task --> report_task[Task: reporting (report)]
 ```
 
 ---
@@ -234,6 +240,10 @@ flowchart LR
   - raw/edited/preprocessed で必要に応じて Dataset を作成し、次フェーズへ dataset_id を渡す。
 - モデル登録:
   - 学習フェーズで OutputModel として登録、推論では InputModel (model_id) を指定するとレジストリからロード。
+- training-summary の推奨モデル:
+  - `recommended_model.csv` と `recommendation_rationale.{md,json}` を出力し、ClearML の `01_overview/*` に表示します。
+- reporting（レポート）:
+  - `outputs/reporting/<run_id>/report.md` を生成し、データ/前処理/推奨モデル/Top5意思決定表を1タスクにまとめます。
 - キュー/サービスキュー:
   - `queue` で通常タスクの実行先、`services_queue` で PipelineController をサービスキューに乗せる設定が可能。
 - ログノイズ抑制:
@@ -253,14 +263,24 @@ clearml:
   services_queue: "services"
   enable_pipeline: true
   run_pipeline_locally: false
-  enable_comparison: true
+  # comparison_mode: disabled | embedded
+  # - embedded: training-summary/reporting に TopK/集計/ヒートマップ等を集約（推奨）
+  # - standalone 比較タスクは pipeline では作りません（必要なら run_comparison を手動実行）
+  comparison_mode: "embedded"
+  summary_plots: "best"
   run_tasks_locally: false
   agents:
     data_registration: "default"
     data_editing: "default"
     preprocessing: "default"
     training: "default"
+    reporting: "default"
     pipeline: "services"
+
+reporting:
+  top_k: 5
+  include_tradeoff_plots: true
+  include_task_links: true
 ```
 
 ### 推論でClearMLモデルを使う例（inference_config.yaml 抜粋）
@@ -299,8 +319,9 @@ models:
 | データ編集 | raw_dataset_id or CSV | edited_dataset_id, Task | 列削除/置換/フィルタ等 | 新しい編集ルールを追加する場合は editing 設定と処理を拡張 |
 | 前処理 | edited_dataset_id or raw | preprocessed_dataset_id, Task | 特徴量型判定→前処理Pipeline生成→transform | 前処理ステップは registry 方式で追加/差し替えやすくする |
 | 学習 | preprocessed_dataset_id or CSV | training-summary Task + per-model Tasks + OutputModel/Artifacts | CV評価・メトリクス記録・モデル保存 | モデル/ハイパラは registry に追加。Plots/Artifactsは指定の形式に統一 |
+| レポート | 前処理+学習の結果 | reporting Task + report.md | データ/前処理/推奨モデル/Top5意思決定表を集約 | レポートの見せ方（表/Markdown/リンク）をここで改善 |
 | 推論 | InputModel (model_id) or model_dir joblib | inference-summary Task + 子タスク (single/grid/optuna) | CSV/範囲探索/最適化 → 予測、最適値探索 | 新しい最適化アルゴリズムや指標を追加するときは inference の search 部分に拡張 |
-| 比較 | 複数 training タスクID | comparison Task | 指標集計・ランキング・best抽出・可視化 | 追加指標やグラフが必要なら comparison ロジックを拡張 |
+| 比較（手動） | 複数 training タスクID | comparison Task | 指標集計・ランキング・best抽出・可視化 | 横断比較（複数run）用途。pipelineでは不要 |
 | パイプライン | config.yaml | Pipeline Controller Task | 各フェーズをキュー実行 | 新フェーズ追加時は PipelineController にステップを追加 |
 
 ### Pipeline／設定変数（表）
@@ -314,8 +335,9 @@ models:
 | clearml | services_queue | Pipeline Controller用キュー |
 | clearml | enable_pipeline | PipelineControllerを使うか |
 | clearml | run_pipeline_locally | ローカルでパイプラインを動かすか |
-| clearml | enable_comparison | 学習結果比較を行うか |
-| clearml.agents | preprocessing/training/pipeline | 各ステップの実行キュー（比較は clearml.comparison_agent） |
+| clearml | comparison_mode | 比較の集約方式（`disabled`/`embedded`。`standalone`比較は手動run_comparison） |
+| clearml | summary_plots | training-summary へ転送する画像（none/best/all） |
+| clearml.agents | data_registration/data_editing/preprocessing/training/reporting/inference/pipeline | 各ステップの実行キュー（未設定なら clearml.queue） |
 | preprocessing | numeric_imputation / categorical_imputation / scaling / encoding | 前処理手法の選択 |
 | models | name / params | 使用するモデルとパラメータ |
 | cross_validation | n_folds / shuffle | CV設定 |
@@ -381,7 +403,7 @@ flowchart TD
 ### 比較
 ```mermaid
 flowchart TD
-    A[trainingタスクID一覧] --> B[Task: compare_results]
+    A[trainingタスクID一覧] --> B[Task: comparison (manual)]
     B --> C[各タスクのR2/MSE/RMSE収集]
     C --> D[集計表/Plotlyで可視化]
     D --> E[Artifacts: metrics_summary.csv]
@@ -393,7 +415,7 @@ flowchart LR
     A[config.yaml] --> B[PipelineController]
     B --> C[preprocessing]
     C --> D[training]
-    D --> E[compare_results]
+    D --> E[reporting]
 ```
 
 ---
@@ -438,7 +460,8 @@ evaluation:
 | 指標を追加/変更 | automl_lib/registry/metrics.py, config.yaml: evaluation | `evaluation.plugins` で外部moduleから登録可（rmseはmse由来のderived指標） |
 | ClearML連携調整 | automl_lib/clearml/*, automl_lib/training/clearml_integration.py, config.yaml: clearml.* | Task/Queue/Agent/Dataset の指定をここで共通化 |
 | 推論挙動を拡張 | automl_lib/inference/*, inference_config.yaml | 入力モードや検索アルゴリズムを追加する場合はここを更新 |
-| 比較フェーズ拡張 | automl_lib/phases/comparison/* | 取得する指標や可視化を追加 |
+| レポート拡張 | automl_lib/phases/reporting/* | 表/Markdown/リンク/意思決定用要約を追加 |
+| 比較フェーズ拡張（任意） | automl_lib/phases/comparison/* | 複数run横断の集計や可視化を追加 |
 | 設定バリデーション | automl_lib/config/schemas.py, automl_lib/config/loaders.py | 不明キーはエラー（typo検知） |
 | ドキュメント更新 | README_user.md, README.md | コマンド例・Mermaid・設定表を同期する |
 

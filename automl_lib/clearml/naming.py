@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Iterable, List, Optional
 
-from .context import RunContext, sanitize_token
+from .context import RunContext, sanitize_name_token, sanitize_token
 
 
 def build_project_path(
@@ -29,40 +29,49 @@ def build_project_path(
 def task_name(phase: str, ctx: RunContext, *, model: Optional[str] = None, preproc: Optional[str] = None) -> str:
     p = str(phase).strip().lower()
     if p in {"data_registration", "data-registration"}:
-        return f"data_registration [{ctx.dataset_key}] [{ctx.run_id}]"
+        return f"data_registration ds:{sanitize_name_token(ctx.dataset_key, max_len=64)} run:{sanitize_name_token(ctx.run_id, max_len=64)}"
     if p in {"data_editing", "data-editing"}:
-        return f"data_editing [{ctx.dataset_key}] [{ctx.run_id}]"
+        return f"data_editing ds:{sanitize_name_token(ctx.dataset_key, max_len=64)} run:{sanitize_name_token(ctx.run_id, max_len=64)}"
     if p in {"preprocessing", "preprocess"}:
-        return f"preprocessing [{ctx.dataset_key}] [{ctx.run_id}]"
+        return f"preprocessing ds:{sanitize_name_token(ctx.dataset_key, max_len=64)} run:{sanitize_name_token(ctx.run_id, max_len=64)}"
     if p in {"training_summary", "training-summary", "training"} and not model:
-        return f"training-summary [{ctx.dataset_key}] [{ctx.run_id}]"
+        return f"training-summary ds:{sanitize_name_token(ctx.dataset_key, max_len=64)} run:{sanitize_name_token(ctx.run_id, max_len=64)}"
     if p in {"training_child", "train", "training-child"} or (p in {"training", "training_summary"} and model):
-        model_tok = sanitize_token(model or "model", max_len=48)
-        parts = ["train"]
-        if preproc:
-            parts.append(f"[{sanitize_token(preproc, max_len=48)}]")
-        parts.append(f"[{model_tok}]")
-        parts.append(f"[{ctx.run_id}]")
+        model_tok = sanitize_name_token(model or "model", max_len=48)
+        pre_tok = sanitize_name_token(preproc, max_len=48) if preproc else None
+        ds_tok = sanitize_name_token(ctx.dataset_key, max_len=64)
+        run_tok = sanitize_name_token(ctx.run_id, max_len=64)
+        parts = ["train", f"ds:{ds_tok}"]
+        if pre_tok:
+            parts.append(f"pre:{pre_tok}")
+        parts.append(f"model:{model_tok}")
+        parts.append(f"run:{run_tok}")
         return " ".join(parts)
     if p in {"comparison", "compare_results", "compare-results"}:
-        return f"comparison [{ctx.dataset_key}] [{ctx.run_id}]"
+        return f"comparison ds:{sanitize_name_token(ctx.dataset_key, max_len=64)} run:{sanitize_name_token(ctx.run_id, max_len=64)}"
     if p in {"inference", "inference_summary", "inference-summary"} and not model:
-        return f"inference-summary [{ctx.dataset_key}] [{ctx.run_id}]"
-    return f"{sanitize_token(p, max_len=48)} [{ctx.dataset_key}] [{ctx.run_id}]"
+        return f"inference-summary ds:{sanitize_name_token(ctx.dataset_key, max_len=64)} run:{sanitize_name_token(ctx.run_id, max_len=64)}"
+    return (
+        f"{sanitize_name_token(p, max_len=48)} ds:{sanitize_name_token(ctx.dataset_key, max_len=64)} "
+        f"run:{sanitize_name_token(ctx.run_id, max_len=64)}"
+    )
 
 
 def dataset_name(kind: str, ctx: RunContext, *, preproc: Optional[str] = None) -> str:
     k = str(kind).strip().lower()
     if k in {"raw", "raw-dataset", "raw_dataset"}:
-        return f"raw-dataset [{ctx.dataset_key}] [{ctx.run_id}]"
+        return f"raw-dataset ds:{sanitize_name_token(ctx.dataset_key, max_len=64)} run:{sanitize_name_token(ctx.run_id, max_len=64)}"
     if k in {"edited", "edited-dataset", "edited_dataset"}:
-        return f"edited-dataset [{ctx.dataset_key}] [{ctx.run_id}]"
+        return f"edited-dataset ds:{sanitize_name_token(ctx.dataset_key, max_len=64)} run:{sanitize_name_token(ctx.run_id, max_len=64)}"
     if k in {"preprocessed", "preprocessed-dataset", "preprocessed_dataset"}:
-        base = f"preprocessed-dataset [{ctx.dataset_key}]"
+        base = f"preprocessed-dataset ds:{sanitize_name_token(ctx.dataset_key, max_len=64)}"
         if preproc:
-            base += f" [{sanitize_token(preproc, max_len=48)}]"
-        return f"{base} [{ctx.run_id}]"
-    return f"{sanitize_token(k, max_len=48)} [{ctx.dataset_key}] [{ctx.run_id}]"
+            base += f" pre:{sanitize_name_token(preproc, max_len=48)}"
+        return f"{base} run:{sanitize_name_token(ctx.run_id, max_len=64)}"
+    return (
+        f"{sanitize_name_token(k, max_len=48)} ds:{sanitize_name_token(ctx.dataset_key, max_len=64)} "
+        f"run:{sanitize_name_token(ctx.run_id, max_len=64)}"
+    )
 
 
 def build_tags(
@@ -95,4 +104,3 @@ def build_tags(
         seen.add(key)
         uniq.append(key)
     return uniq
-

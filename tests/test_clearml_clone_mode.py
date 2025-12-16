@@ -119,7 +119,7 @@ class TestCloneModeHelpers(unittest.TestCase):
         self.assertIn("run:20251213-153012-a1b2c3", cloned.tags)
         self.assertIn("cloned_from:template-1", cloned.tags)
         self.assertIn("x", cloned.tags)
-        self.assertTrue(cloned.name.endswith("[20251213-153012-a1b2c3]"))
+        self.assertTrue(cloned.name.endswith("run:20251213-153012-a1b2c3"))
         self.assertEqual(cloned.configs.get("overrides"), {"data.dataset_id": "ds1", "run.id": "20251213-153012-a1b2c3"})
         self.assertEqual(cloned.params.get("data.dataset_id"), "ds1")
         self.assertEqual(cloned.params.get("run.id"), "20251213-153012-a1b2c3")

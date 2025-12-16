@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 from typing import Any, Dict, Optional
 
@@ -6,10 +8,12 @@ from automl_lib.clearml.context import build_run_context, get_run_id_env, resolv
 from automl_lib.clearml.naming import build_project_path, build_tags, task_name
 
 
-def create_data_editing_task(config: Dict[str, Any], parent_task_id: Optional[str] = None) -> Dict[str, Any]:
+def create_reporting_task(config: Dict[str, Any], parent_task_id: Optional[str] = None) -> Dict[str, Any]:
     clearml_cfg = config.get("clearml") or {}
+    reporting_cfg = config.get("reporting") or {}
     if not clearml_cfg.get("enabled", False):
         return {"task": None, "logger": None}
+
     run_cfg = config.get("run") or {}
     data_cfg = config.get("data") or {}
     run_id = resolve_run_id(from_config=run_cfg.get("id"), from_env=get_run_id_env())
@@ -26,9 +30,17 @@ def create_data_editing_task(config: Dict[str, Any], parent_task_id: Optional[st
         user=run_cfg.get("user"),
     )
     naming_cfg = clearml_cfg.get("naming") or {}
-    project = build_project_path(ctx, project_mode=naming_cfg.get("project_mode", "root"))
+    suffix = str(reporting_cfg.get("project_suffix") or "reports").strip() or "reports"
+    project = build_project_path(ctx, project_mode=naming_cfg.get("project_mode", "root"), suffix=suffix)
     queue = clearml_cfg.get("queue")
-    tags = build_tags(ctx, phase="data_editing", extra=clearml_cfg.get("tags"))
+    try:
+        agents = clearml_cfg.get("agents") or {}
+        q = agents.get("reporting")
+        if q:
+            queue = str(q)
+    except Exception:
+        pass
+    tags = build_tags(ctx, phase="reporting", extra=[*(clearml_cfg.get("tags") or []), "report"])
 
     # If running inside ClearML PipelineController step, reuse the step task.
     if os.environ.get("AUTO_ML_PIPELINE_ACTIVE") == "1":
@@ -38,7 +50,7 @@ def create_data_editing_task(config: Dict[str, Any], parent_task_id: Optional[st
             current = Task.current_task()
             if current:
                 try:
-                    current.set_name(task_name("data_editing", ctx))
+                    current.set_name(task_name("reporting", ctx))
                 except Exception:
                     pass
                 if parent_task_id:
@@ -59,19 +71,19 @@ def create_data_editing_task(config: Dict[str, Any], parent_task_id: Optional[st
                         {
                             "Run": config.get("run") or {},
                             "Data": config.get("data") or {},
-                            "Editing": config.get("editing") or {},
+                            "Reporting": config.get("reporting") or {},
                             "ClearML": clearml_cfg,
                         },
                     )
                 except Exception:
                     pass
-                return {"task": current, "logger": current.get_logger()}
+                return {"task": current, "logger": current.get_logger(), "project": project, "queue": queue}
         except Exception:
             pass
 
     task = init_task(
         project=project,
-        name=task_name("data_editing", ctx),
+        name=task_name("reporting", ctx),
         task_type="data_processing",
         queue=queue,
         parent=parent_task_id,
@@ -85,15 +97,15 @@ def create_data_editing_task(config: Dict[str, Any], parent_task_id: Optional[st
                 {
                     "Run": config.get("run") or {},
                     "Data": config.get("data") or {},
-                    "Editing": config.get("editing") or {},
+                    "Reporting": config.get("reporting") or {},
                     "ClearML": clearml_cfg,
                 },
             )
         except Exception:
             pass
-    return {"task": task, "logger": task.get_logger() if task else None}
+    return {"task": task, "logger": task.get_logger() if task else None, "project": project, "queue": queue}
 
 
-def finalize_data_editing_task(task, artifact_paths=None) -> None:
+def finalize_reporting_task(task, artifact_paths=None) -> None:
     if task and artifact_paths:
         upload_artifacts(task, artifact_paths)

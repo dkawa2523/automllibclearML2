@@ -20,6 +20,7 @@ def run_training_processing(
     parent_task_id: Optional[str] = None,
     *,
     run_id: Optional[str] = None,
+    comparison_config_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run training phase inside automl_lib.
@@ -63,8 +64,11 @@ def run_training_processing(
         "AUTO_ML_DATASET_ID": os.environ.get("AUTO_ML_DATASET_ID"),
         "AUTO_ML_PREPROCESSED_DATASET_ID": os.environ.get("AUTO_ML_PREPROCESSED_DATASET_ID"),
         "AUTO_ML_RUN_ID": os.environ.get("AUTO_ML_RUN_ID"),
+        "AUTO_ML_COMPARISON_CONFIG_PATH": os.environ.get("AUTO_ML_COMPARISON_CONFIG_PATH"),
     }
     set_run_id_env(run_id)
+    if comparison_config_path:
+        os.environ["AUTO_ML_COMPARISON_CONFIG_PATH"] = str(comparison_config_path)
 
     dataset_id = (input_info or {}).get("dataset_id")
 

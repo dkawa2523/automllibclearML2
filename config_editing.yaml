@@ -9,7 +9,10 @@ data:
 
 editing:
   enable: true
-  output_path: "outputs/data_editing/edited.csv"
+  # output_dir は run_id でサブディレクトリ化されます（上書き防止）。
+  # output_path を指定した場合はそちらが優先されます（互換用）。
+  output_dir: "outputs/data_editing"
+  output_filename: "edited.csv"
   drop_columns: []
   rename_columns: {}
   fillna: null

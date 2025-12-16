@@ -51,11 +51,40 @@ def get_run_id_env() -> Optional[str]:
     return value or None
 
 
+def run_scoped_output_dir(base_dir: Path, run_id: Optional[str]) -> Path:
+    """Return a run-scoped output directory (base_dir/<run_id>), idempotently."""
+
+    if not run_id:
+        return base_dir
+    token = sanitize_name_token(str(run_id), max_len=64)
+    try:
+        if token in base_dir.parts:
+            return base_dir
+    except Exception:
+        pass
+    return base_dir / token
+
+
 def sanitize_token(value: str, *, max_len: int = 64) -> str:
     """Make a value safe for ClearML tags/names (best-effort)."""
 
     text = str(value).strip().replace(" ", "_")
     text = re.sub(r"[^0-9A-Za-z._:-]+", "_", text)
+    text = re.sub(r"_+", "_", text).strip("_")
+    if not text:
+        return "unknown"
+    return text[:max_len]
+
+
+def sanitize_name_token(value: str, *, max_len: int = 64) -> str:
+    """Make a value safe for ClearML task/dataset names when treated as a regex.
+
+    ClearML server-side APIs sometimes treat name filters as regex patterns.
+    Avoid characters like '.' that can change matching semantics or break parsing.
+    """
+
+    text = str(value).strip().replace(" ", "_")
+    text = re.sub(r"[^0-9A-Za-z_:-]+", "_", text)
     text = re.sub(r"_+", "_", text).strip("_")
     if not text:
         return "unknown"
@@ -125,4 +154,3 @@ def build_run_context(
         dataset_key=key,
         tags_base=[f"run:{rid}", f"dataset:{key}"],
     )
-

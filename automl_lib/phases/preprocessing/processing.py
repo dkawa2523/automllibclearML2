@@ -4,17 +4,26 @@ Core processing for preprocessing phase.
 """
 
 import os
+import json
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import pandas as pd
 
-from automl_lib.clearml import dataframe_from_dataset, register_dataset_from_path, disable_resource_monitoring, upload_artifacts
+from automl_lib.clearml import (
+    dataframe_from_dataset,
+    register_dataset_from_path,
+    disable_resource_monitoring,
+    upload_artifacts,
+    report_scalar,
+)
 from automl_lib.clearml.context import (
     build_run_context,
     get_run_id_env,
     resolve_dataset_key,
     resolve_run_id,
+    run_scoped_output_dir,
     set_run_id_env,
 )
 from automl_lib.clearml.naming import build_tags, dataset_name
@@ -101,7 +110,10 @@ def run_preprocessing_processing(
     if not dataset_id_source:
         raise ValueError("preprocessing requires data.dataset_id (existing ClearML Dataset ID)")
 
+    t_total0 = time.perf_counter()
+    t0 = time.perf_counter()
     df_raw = dataframe_from_dataset(str(dataset_id_source))
+    load_dataset_seconds = float(time.perf_counter() - t0)
     if df_raw is None:
         raise ValueError(f"Failed to load ClearML Dataset (dataset_id={dataset_id_source})")
 
@@ -120,7 +132,9 @@ def run_preprocessing_processing(
         ).model_dump()
 
     preproc_name, transformer = preprocessors[0]
+    t1 = time.perf_counter()
     transformed = transformer.fit_transform(X_df)
+    fit_transform_seconds = float(time.perf_counter() - t1)
     try:
         feature_names = transformer.get_feature_names_out()
     except Exception:
@@ -163,10 +177,32 @@ def run_preprocessing_processing(
         except Exception:
             pass
 
-    output_dir = Path(cfg.output.output_dir) if cfg.output else Path("outputs/train")
+    base_output_dir = Path(cfg.output.output_dir) if cfg.output else Path("outputs/train")
+    output_dir = run_scoped_output_dir(base_output_dir, run_id)
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_out = output_dir / "preprocessed_features.csv"
     df_preproc.to_csv(csv_out, index=False)
+
+    timing_path = output_dir / "preprocessing_timing.json"
+    timing = {
+        "run_id": run_id,
+        "dataset_key": dataset_key,
+        "dataset_id_source": str(dataset_id_source),
+        "selected_preprocessor": str(preproc_name),
+        "load_dataset_seconds": load_dataset_seconds,
+        "fit_transform_seconds": fit_transform_seconds,
+    }
+    try:
+        timing_path.write_text(json.dumps(timing, ensure_ascii=False, indent=2), encoding="utf-8")
+        if task:
+            upload_artifacts(task, [timing_path])
+    except Exception:
+        pass
+    try:
+        report_scalar(logger, "time/load_dataset_seconds", "value", load_dataset_seconds, iteration=0)
+        report_scalar(logger, "time/fit_transform_seconds", "value", fit_transform_seconds, iteration=0)
+    except Exception:
+        pass
 
     # Diagnostics (plots/tables) + metadata artifacts
     try:
@@ -199,6 +235,7 @@ def run_preprocessing_processing(
     except Exception:
         pass
 
+    t2 = time.perf_counter()
     dataset_id = register_dataset_from_path(
         name=dataset_name("preprocessed", ctx, preproc=preproc_name),
         path=csv_out,
@@ -207,12 +244,35 @@ def run_preprocessing_processing(
         tags=build_tags(ctx, phase="preprocessing", preproc=preproc_name, extra=[*(clearml_cfg.tags or []), "preprocessed"]),
         output_uri=clearml_cfg.base_output_uri if clearml_cfg else None,
     )
+    register_dataset_seconds = float(time.perf_counter() - t2)
     if not dataset_id:
         raise RuntimeError("Failed to register preprocessed dataset to ClearML")
 
     try:
+        timing["register_dataset_seconds"] = register_dataset_seconds
+        timing["dataset_id_preprocessed"] = str(dataset_id)
+        timing["total_seconds"] = float(time.perf_counter() - t_total0)
+        timing_path.write_text(json.dumps(timing, ensure_ascii=False, indent=2), encoding="utf-8")
+        if task:
+            upload_artifacts(task, [timing_path])
+    except Exception:
+        pass
+    try:
+        report_scalar(logger, "time/register_dataset_seconds", "value", register_dataset_seconds, iteration=0)
+        report_scalar(logger, "time/total_seconds", "value", float(time.perf_counter() - t_total0), iteration=0)
+    except Exception:
+        pass
+
+    try:
         if task:
             task.upload_artifact("preprocessed_dataset_id", artifact_object=str(dataset_id), wait_on_upload=True)
+    except Exception:
+        pass
+    try:
+        pre_id_path = output_dir / "preprocessed_dataset_id.txt"
+        pre_id_path.write_text(str(dataset_id), encoding="utf-8")
+        if task:
+            upload_artifacts(task, [pre_id_path])
     except Exception:
         pass
     try:

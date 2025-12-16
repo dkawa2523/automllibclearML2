@@ -6,7 +6,7 @@
 
 - run_id・命名・tags を統一し、ClearML上で迷子にならない
 - Hyperparameters をカテゴリ分割し、「何を変えたか」を追える
-- 前処理/学習/比較で、非専門でも理解できる可視化・サマリを残す
+- 前処理/学習/（必要なら比較）/レポートで、非専門でも理解できる可視化・サマリを残す
 
 ## 主要ディレクトリ
 
@@ -21,6 +21,8 @@
 - `automl_lib/clearml/context.py` が run_id と dataset_key を解決します。
   - 優先度：明示引数 → 入力info → config → env（`AUTO_ML_RUN_ID`）
 - phase間で run_id を渡すため、処理の入口で `AUTO_ML_RUN_ID` を設定します。
+- 出力は原則 run 単位で分離します（上書き防止）。
+  - `automl_lib/clearml/context.py::run_scoped_output_dir()` を利用し、`outputs/<phase>/<run_id>/...` に保存します。
 
 ## 命名・tags 規約
 
@@ -41,17 +43,29 @@
 
 - `automl_lib/phases/preprocessing/visualization.py`: ターゲット分布/欠損/特徴量数など
 - `automl_lib/phases/preprocessing/meta.py`: schema/pipeline 等の artifacts を生成
+- `outputs/preprocessing/<run_id>/preprocessing_timing.json` に処理時間を保存し、`time/*` の scalar も送信します
 
 ### Training
 
 - `automl_lib/training/run.py` が実行本体です（段階的に reporting に分離中）
 - `automl_lib/training/reporting/scalars.py`: `metric/<name>` など比較しやすいscalar命名を集約
 - 学習子タスクは、`metric/*`（比較用） + `time/*` + `model/*` を揃える方針です。
+- `clearml.comparison_mode: embedded` の場合、training-summary の推奨モデル選定は comparison の `ranking.*`（例: `composite_score`）に合わせます。
+  - `clearml.recommendation_mode` で切替可能（`auto`/`training`/`comparison`）。
 
-### Comparison
+### Reporting
 
-- `automl_lib/phases/comparison/processing.py` が学習タスク群の指標を集計します。
-- `automl_lib/phases/comparison/visualization.py` がヒートマップ等を出力します。
+- `automl_lib/phases/reporting/processing.py` が run 単位のレポート（Markdown + ClearML tables/text）を生成します。
+  - `outputs/reporting/<run_id>/report.md`
+  - データ概要 / 前処理要約（時間含む）/ 推奨モデル / Top5意思決定表（精度・速度・サイズ）
+  - 分散実行でローカル出力が無い場合は、前段タスク（preprocessing/training-summary）の artifacts を task_id からダウンロードして補完します。
+  - `reporting.resolve_from_clearml: true` のときのみ（デフォルトtrue）
+  - `reporting.top_k` / `reporting.include_tradeoff_plots` で意思決定用の表示量を調整できます
+
+### Comparison（任意/手動）
+
+- pipeline は comparison タスクを作りません（reporting で集約します）。
+- 複数 run を横断して比較したい場合のみ `automl_lib/cli/run_comparison.py` を使います（`TrainingInfo` を複数渡せます）。
 
 ## Clone実行（テンプレ複製）
 
@@ -61,7 +75,7 @@
 
 ## テスト
 
-- `./.venv/bin/python -m unittest -q`
+- `./.venv/bin/python -m unittest discover -s tests -q`
 
 ## 新しい拡張を入れる時の推奨フロー
 

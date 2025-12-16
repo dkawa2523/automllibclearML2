@@ -39,5 +39,5 @@ class TestRunContextAndNaming(unittest.TestCase):
             dataset_project="datasets",
             user="tester",
         )
-        self.assertEqual(task_name("preprocessing", ctx), "preprocessing [example] [20251213-153012-a1b2c3]")
-        self.assertIn("[example]", dataset_name("preprocessed", ctx, preproc="standard"))
+        self.assertEqual(task_name("preprocessing", ctx), "preprocessing ds:example run:20251213-153012-a1b2c3")
+        self.assertIn("ds:example", dataset_name("preprocessed", ctx, preproc="standard"))

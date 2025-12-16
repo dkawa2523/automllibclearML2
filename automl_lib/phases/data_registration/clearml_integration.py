@@ -38,6 +38,18 @@ def create_data_registration_task(config: Dict[str, Any], parent_task_id: Option
             current = Task.current_task()
             if current:
                 try:
+                    current.set_name(task_name("data_registration", ctx))
+                except Exception:
+                    pass
+                if parent_task_id:
+                    try:
+                        current.add_parent(str(parent_task_id))
+                    except Exception:
+                        try:
+                            current.set_parent(str(parent_task_id))
+                        except Exception:
+                            pass
+                try:
                     current.add_tags(tags)
                 except Exception:
                     pass

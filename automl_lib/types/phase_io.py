@@ -41,6 +41,18 @@ class ComparisonInfo(BaseModel):
     run_id: Optional[str] = None
 
 
+class ReportingInfo(BaseModel):
+    """
+    Reporting phase output structure.
+    """
+
+    task_id: Optional[str] = None
+    dataset_id: Optional[str] = None
+    output_dir: Optional[str] = None
+    report_md: Optional[str] = None
+    run_id: Optional[str] = None
+
+
 class InferenceInfo(BaseModel):
     """
     Inference phase output structure.

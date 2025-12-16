@@ -69,6 +69,8 @@ from automl_lib.clearml.context import (
     get_run_id_env,
     resolve_dataset_key,
     resolve_run_id,
+    run_scoped_output_dir,
+    sanitize_name_token,
     set_run_id_env,
 )
 from automl_lib.clearml.naming import build_project_path, build_tags, task_name
@@ -81,7 +83,7 @@ from .clearml_integration import ClearMLManager, _import_clearml, ensure_local_d
 from .data_loader import get_feature_types, infer_problem_type, load_dataset, split_data
 from .ensemble import build_stacking, build_voting
 from .evaluation import _get_cv_splitter, _get_scoring, evaluate_model_combinations
-from .interpretation import extract_feature_importance, plot_feature_importance, plot_shap_summary
+from .interpretation import compute_shap_importance, extract_feature_importance, plot_feature_importance, plot_shap_summary
 from .model_factory import ModelInstance, prepare_tabpfn_params
 from .search import generate_param_combinations
 from .tabpfn_utils import OfflineTabPFNRegressor
@@ -310,6 +312,7 @@ def run_automl(config_path: Path) -> None:
         raise ValueError(f"Invalid training config: {exc}") from exc
     run_id = resolve_run_id(from_config=getattr(cfg.run, "id", None), from_env=get_run_id_env())
     set_run_id_env(run_id)
+    base_output_dir = Path(cfg.output.output_dir)
     training_task_ids: List[str] = []
     raw_dataset_id = cfg.clearml.raw_dataset_id if cfg.clearml else None
     preprocessed_dataset_id = cfg.clearml.preprocessed_dataset_id if cfg.clearml else None
@@ -328,7 +331,7 @@ def run_automl(config_path: Path) -> None:
     if dataset_id_for_load:
         dataset_id_for_load = _normalize_dataset_id(str(dataset_id_for_load), cfg)
     if dataset_id_for_load:
-        local_copy = ensure_local_dataset_copy(dataset_id_for_load, Path(cfg.output.output_dir) / "clearml_dataset")
+        local_copy = ensure_local_dataset_copy(dataset_id_for_load, base_output_dir / "clearml_dataset")
         if cfg.clearml and cfg.clearml.enabled and not local_copy:
             raise ValueError(f"Failed to download ClearML Dataset (dataset_id={dataset_id_for_load})")
         csv_override = find_first_csv(local_copy) if local_copy else None
@@ -355,7 +358,8 @@ def run_automl(config_path: Path) -> None:
 
     base_summary_name = cfg.clearml.task_name if cfg.clearml and cfg.clearml.task_name else None
     summary_task_name = (
-        f"{base_summary_name} [{ctx.dataset_key}] [{ctx.run_id}]"
+        f"{sanitize_name_token(base_summary_name, max_len=64)} ds:{sanitize_name_token(ctx.dataset_key, max_len=64)} "
+        f"run:{sanitize_name_token(ctx.run_id, max_len=64)}"
         if base_summary_name
         else task_name("training_summary", ctx)
     )
@@ -367,6 +371,13 @@ def run_automl(config_path: Path) -> None:
         project=project_for_summary,
         extra_tags=build_tags(ctx, phase="training"),
     )
+    summary_plots_mode = "best"
+    try:
+        summary_plots_mode = str(getattr(cfg.clearml, "summary_plots", "best") if cfg.clearml else "none").strip().lower()
+    except Exception:
+        summary_plots_mode = "best"
+    if summary_plots_mode not in {"none", "best", "all"}:
+        summary_plots_mode = "best"
 
     # Load data
     X, y = load_dataset(cfg.data)
@@ -722,7 +733,7 @@ def run_automl(config_path: Path) -> None:
     if ensemble_records:
         results_df = pd.concat([results_df, pd.DataFrame(ensemble_records)], ignore_index=True)
     # Prepare output directory
-    output_dir = Path(cfg.output.output_dir)
+    output_dir = run_scoped_output_dir(base_output_dir, run_id)
     output_dir.mkdir(parents=True, exist_ok=True)
     # Save only the best result per model. Determine primary metric to rank within each model
     primary_metric_model = cfg.evaluation.primary_metric or ("r2" if problem_type == "regression" else "accuracy")
@@ -732,12 +743,24 @@ def run_automl(config_path: Path) -> None:
     # Identify best row for each model (including ensembles) based on primary metric
     best_rows: Dict[str, pd.Series] = {}
     if primary_metric_model:
+        goal_primary = "min" if is_loss_metric(primary_metric_model, problem_type=problem_type) else "max"
         for _, row in results_df.iterrows():
             if pd.isna(row.get(primary_metric_model)):
                 continue
             model_label = row["model"]
             score = row[primary_metric_model]
-            if model_label not in best_rows or score > best_rows[model_label][primary_metric_model]:
+            if model_label not in best_rows:
+                best_rows[model_label] = row
+                continue
+            try:
+                current = best_rows[model_label][primary_metric_model]
+            except Exception:
+                current = None
+            if pd.isna(current):
+                best_rows[model_label] = row
+                continue
+            better = score < current if goal_primary == "min" else score > current
+            if better:
                 best_rows[model_label] = row
     else:
         for _, row in results_df.iterrows():
@@ -752,7 +775,7 @@ def run_automl(config_path: Path) -> None:
     results_path = output_dir / cfg.output.results_csv
     results_df_best.to_csv(results_path, index=False)
     results_df_best.to_json(results_path.with_suffix(".json"), orient="records", indent=2)
-    clearml_mgr.report_table("cv_results_best", results_df_best, series="cv")
+    clearml_mgr.report_table("02_leaderboard/cv_best_per_model", results_df_best, series="leaderboard")
     # bar chart for metrics comparison
     try:
         import plotly.express as px  # type: ignore
@@ -763,7 +786,7 @@ def run_automl(config_path: Path) -> None:
             df_bar = results_df_best[["model"] + metric_cols].melt(id_vars=["model"], var_name="metric", value_name="value")
             fig = px.bar(df_bar, x="model", y="value", color="metric", barmode="group", title="Model metric comparison")
             if clearml_mgr.logger:
-                clearml_mgr.logger.report_plotly(title="metric_bar", series="metrics", iteration=0, figure=fig)
+                clearml_mgr.logger.report_plotly(title="02_leaderboard/metrics_bar", series="leaderboard", iteration=0, figure=fig)
     except Exception:
         pass
     # Generate visualizations if enabled
@@ -805,13 +828,234 @@ def run_automl(config_path: Path) -> None:
                 )
             except Exception as e:
                 print(f"Warning: failed to create comparative heatmap: {e}")
+
+    # ---------------------------------------------------------------------
+    # Optional: embed comparison aggregation into training-summary task
+    # ---------------------------------------------------------------------
+    embed_comparison = bool(cfg.clearml and getattr(cfg.clearml, "comparison_mode", "disabled") == "embedded")
+    if embed_comparison:
+        try:
+            from automl_lib.phases.comparison.meta import build_comparison_metadata
+            from automl_lib.phases.comparison.visualization import (
+                render_comparison_visuals,
+                render_model_summary_visuals,
+                render_win_summary_visuals,
+            )
+
+            # Prefer an explicit comparison config (pipeline/controller passes it), then
+            # fall back to config_comparison.yaml if present, else derive defaults from the training config.
+            cmp_cfg = None
+            ranking_cfg = None
+            try:
+                from automl_lib.config.loaders import load_comparison_config
+
+                cmp_path = os.environ.get("AUTO_ML_COMPARISON_CONFIG_PATH")
+                if cmp_path:
+                    cmp_cfg = load_comparison_config(Path(str(cmp_path)))
+                else:
+                    default_cmp = Path("config_comparison.yaml")
+                    if default_cmp.exists():
+                        cmp_cfg = load_comparison_config(default_cmp)
+                    else:
+                        cmp_cfg = load_comparison_config(config_path)
+                ranking_cfg = getattr(cmp_cfg, "ranking", None)
+            except Exception:
+                cmp_cfg = None
+                ranking_cfg = None
+
+            cmp_clearml_cfg = getattr(cmp_cfg, "clearml", None) if cmp_cfg else None
+            if not cmp_clearml_cfg:
+                cmp_clearml_cfg = cfg.clearml
+
+            desired_metrics: List[str] = []
+            try:
+                if ranking_cfg and getattr(ranking_cfg, "metrics", None):
+                    desired_metrics = [str(m).strip().lower() for m in (ranking_cfg.metrics or []) if str(m).strip()]
+            except Exception:
+                desired_metrics = []
+            if not desired_metrics:
+                try:
+                    if cmp_clearml_cfg and getattr(cmp_clearml_cfg, "comparison_metrics", None):
+                        desired_metrics = [
+                            str(m).strip().lower()
+                            for m in (cmp_clearml_cfg.comparison_metrics or [])
+                            if str(m).strip()
+                        ]
+                except Exception:
+                    desired_metrics = []
+            if not desired_metrics:
+                try:
+                    desired_metrics = [str(m).strip().lower() for m in (metrics or []) if str(m).strip()]
+                except Exception:
+                    desired_metrics = []
+            if not desired_metrics:
+                desired_metrics = ["r2", "rmse", "mae"]
+
+            primary_metric_cmp = None
+            try:
+                if ranking_cfg and getattr(ranking_cfg, "primary_metric", None):
+                    primary_metric_cmp = str(ranking_cfg.primary_metric).strip().lower()
+            except Exception:
+                primary_metric_cmp = None
+            if not primary_metric_cmp and primary_metric_model:
+                try:
+                    primary_metric_cmp = str(primary_metric_model).strip().lower()
+                except Exception:
+                    primary_metric_cmp = None
+            if (not primary_metric_cmp) and desired_metrics:
+                primary_metric_cmp = desired_metrics[0]
+            if primary_metric_cmp and primary_metric_cmp not in {"composite_score"} and primary_metric_cmp not in desired_metrics:
+                desired_metrics.append(primary_metric_cmp)
+
+            goal_cmp = None
+            try:
+                if ranking_cfg and getattr(ranking_cfg, "goal", None):
+                    goal_cmp = str(ranking_cfg.goal).strip().lower()
+            except Exception:
+                goal_cmp = None
+
+            top_k_cmp = None
+            try:
+                if ranking_cfg and getattr(ranking_cfg, "top_k", None) is not None:
+                    top_k_cmp = int(ranking_cfg.top_k)
+            except Exception:
+                top_k_cmp = None
+            if top_k_cmp is None:
+                top_k_cmp = 50
+
+            composite_cfg = getattr(ranking_cfg, "composite", None) if ranking_cfg else None
+            composite_enabled = True
+            composite_metrics = None
+            composite_weights = None
+            composite_require_all = False
+            if composite_cfg:
+                try:
+                    composite_enabled = bool(getattr(composite_cfg, "enabled", True))
+                except Exception:
+                    composite_enabled = True
+                try:
+                    composite_require_all = bool(getattr(composite_cfg, "require_all_metrics", False))
+                except Exception:
+                    composite_require_all = False
+                try:
+                    composite_metrics = list(getattr(composite_cfg, "metrics", []) or [])
+                except Exception:
+                    composite_metrics = None
+                try:
+                    composite_weights = dict(getattr(composite_cfg, "weights", {}) or {})
+                except Exception:
+                    composite_weights = None
+            if composite_metrics:
+                for m in composite_metrics:
+                    try:
+                        cand = str(m).strip().lower()
+                    except Exception:
+                        continue
+                    if cand and cand not in desired_metrics and cand not in {"composite_score"}:
+                        desired_metrics.append(cand)
+
+            # Keep output location compatible with the standalone comparison phase.
+            try:
+                comparison_base_dir = Path(cmp_cfg.output.output_dir) if cmp_cfg else Path("outputs/comparison")
+            except Exception:
+                comparison_base_dir = Path("outputs/comparison")
+            comparison_output_dir = run_scoped_output_dir(comparison_base_dir, run_id)
+            try:
+                df_cmp = results_df.copy()
+                df_cmp = df_cmp.assign(run_id=run_id, dataset_key=dataset_key)
+                rows_cmp = df_cmp.to_dict(orient="records")
+            except Exception:
+                rows_cmp = []
+
+            meta_cmp = build_comparison_metadata(
+                rows_cmp,
+                output_dir=comparison_output_dir,
+                metric_cols=desired_metrics,
+                primary_metric=primary_metric_cmp,
+                goal=goal_cmp,
+                group_col="preprocessor",
+                top_k=top_k_cmp,
+                composite_enabled=composite_enabled,
+                composite_metrics=composite_metrics,
+                composite_weights=composite_weights,
+                composite_require_all=composite_require_all,
+            )
+
+            if clearml_mgr.logger:
+                try:
+                    topk_df = meta_cmp.get("ranked_topk_df")
+                    if isinstance(topk_df, pd.DataFrame) and not topk_df.empty:
+                        clearml_mgr.report_table("03_comparison/topk", topk_df, series="comparison")
+                except Exception:
+                    pass
+                try:
+                    best_by_model_df = meta_cmp.get("best_by_model_df")
+                    if isinstance(best_by_model_df, pd.DataFrame) and not best_by_model_df.empty:
+                        clearml_mgr.report_table("03_comparison/best_by_model", best_by_model_df, series="comparison")
+                except Exception:
+                    pass
+                try:
+                    win_summary_df = meta_cmp.get("win_summary_df")
+                    if isinstance(win_summary_df, pd.DataFrame) and not win_summary_df.empty:
+                        clearml_mgr.report_table("03_comparison/win_summary", win_summary_df, series="comparison")
+                        render_win_summary_visuals(clearml_mgr.logger, win_summary_df, title_prefix="03_comparison")
+                except Exception:
+                    pass
+                try:
+                    model_summary_df = meta_cmp.get("model_summary_df")
+                    if (
+                        isinstance(model_summary_df, pd.DataFrame)
+                        and not model_summary_df.empty
+                        and primary_metric_model
+                    ):
+                        render_model_summary_visuals(
+                            clearml_mgr.logger,
+                            model_summary_df,
+                            primary_metric=str(primary_metric_model).strip().lower(),
+                            title_prefix="03_comparison",
+                        )
+                except Exception:
+                    pass
+                try:
+                    best_by_group_model_df = meta_cmp.get("best_by_group_model_df")
+                    ranked_df = meta_cmp.get("ranked_df")
+                    df_vis = None
+                    if isinstance(best_by_group_model_df, pd.DataFrame) and not best_by_group_model_df.empty:
+                        df_vis = best_by_group_model_df
+                    elif isinstance(ranked_df, pd.DataFrame) and not ranked_df.empty:
+                        df_vis = ranked_df
+                    if isinstance(df_vis, pd.DataFrame) and not df_vis.empty:
+                        render_comparison_visuals(
+                            clearml_mgr.logger,
+                            df_vis,
+                            metric_cols=desired_metrics,
+                            title_prefix="03_comparison",
+                        )
+                except Exception:
+                    pass
+
+            try:
+                if clearml_mgr.task and isinstance(meta_cmp.get("artifacts"), list):
+                    clearml_mgr.upload_artifacts(
+                        [Path(p) for p in meta_cmp["artifacts"] if isinstance(p, str) and str(p).strip()]
+                    )
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     # Choose the overall best model across models using the filtered results
     primary_metric_global = primary_metric_model
     if not primary_metric_global or primary_metric_global not in results_df_best.columns:
         cols_available = [c for c in results_df_best.columns if c not in {"preprocessor", "model", "params", "error"}]
         primary_metric_global = cols_available[0] if cols_available else None
     if primary_metric_global:
-        best_row = results_df_best.loc[results_df_best[primary_metric_global].idxmax()]
+        goal_global = "min" if is_loss_metric(primary_metric_global, problem_type=problem_type) else "max"
+        best_row = (
+            results_df_best.loc[results_df_best[primary_metric_global].idxmin()]
+            if goal_global == "min"
+            else results_df_best.loc[results_df_best[primary_metric_global].idxmax()]
+        )
     else:
         best_row = results_df_best.iloc[0]
     # Retrieve preprocessor and estimator for best model (if ensemble, skip saving)
@@ -999,9 +1243,29 @@ def run_automl(config_path: Path) -> None:
     # Iterate over best models (per model training tasks)
     for model_label, row in best_rows.items():
         model_task_mgr = None
+        record: Dict[str, Any] = {}
         try:
             preproc_name = row["preprocessor"]
             params = row["params"] if isinstance(row.get("params"), dict) else {}
+            safe_name = (
+                f"{model_label.replace(' ', '_').replace('(', '').replace(')', '').replace('+', '_')}_"
+                f"{str(preproc_name).replace('|', '_')}"
+            )
+            record = {
+                "model": model_label,
+                "preprocessor": preproc_name,
+                "status": "pending",
+                "error": "",
+                "train_seconds": None,
+                "predict_seconds": None,
+                "predict_train_seconds": None,
+                "predict_test_seconds": None,
+                "model_size_bytes": None,
+                "num_features": None,
+                "task_id": "",
+                "url": "",
+                "link_html": "",
+            }
             # Lookup transformer
             transformer = None
             for name, ct in preprocessors:
@@ -1036,7 +1300,12 @@ def run_automl(config_path: Path) -> None:
                     from sklearn.linear_model import LinearRegression, LogisticRegression
                     if final_est is None:
                         final_est = LinearRegression() if problem_type == "regression" else LogisticRegression(max_iter=1000)
-                    estimator_obj = build_stacking(transformer, ests, final_est, problem_type).named_steps["model"]
+                    try:
+                        estimator_obj = build_stacking(transformer, ests, final_est, problem_type).named_steps["model"]
+                    except Exception as exc:
+                        record["status"] = "failed"
+                        record["error"] = f"build_stacking failed: {exc}"
+                        continue
                 else:
                     base_names = cfg.ensembles.voting.estimators
                     voting_scheme = cfg.ensembles.voting.voting or ("hard" if problem_type == "classification" else "soft")
@@ -1047,12 +1316,19 @@ def run_automl(config_path: Path) -> None:
                             ests.append((bn, cls_bn()))
                         except Exception:
                             pass
-                    estimator_obj = build_voting(transformer, ests, voting_scheme, problem_type).named_steps["model"]
+                    try:
+                        estimator_obj = build_voting(transformer, ests, voting_scheme, problem_type).named_steps["model"]
+                    except Exception as exc:
+                        record["status"] = "failed"
+                        record["error"] = f"build_voting failed: {exc}"
+                        continue
             else:
                 # Base model
                 try:
                     cls = _get_model_class(model_label, problem_type)
-                except Exception:
+                except Exception as exc:
+                    record["status"] = "skipped"
+                    record["error"] = f"_get_model_class failed: {exc}"
                     continue
                 try:
                     estimator_obj, _ = _build_estimator_with_defaults(
@@ -1063,10 +1339,17 @@ def run_automl(config_path: Path) -> None:
                         cfg,
                         len(y_train),
                     )
-                except Exception:
+                except Exception as exc:
+                    record["status"] = "skipped"
+                    record["error"] = f"_build_estimator_with_defaults failed: {exc}"
                     continue
             if problem_type == "regression":
-                estimator_obj = _maybe_wrap_with_target_scaler(estimator_obj, cfg, problem_type)
+                try:
+                    estimator_obj = _maybe_wrap_with_target_scaler(estimator_obj, cfg, problem_type)
+                except Exception as exc:
+                    record["status"] = "failed"
+                    record["error"] = f"_maybe_wrap_with_target_scaler failed: {exc}"
+                    continue
             # Build and fit pipeline
             from sklearn.pipeline import Pipeline as SKPipeline
             pipeline_best = SKPipeline([
@@ -1078,8 +1361,12 @@ def run_automl(config_path: Path) -> None:
                 t0 = time.perf_counter()
                 pipeline_best.fit(X_train, y_train)
                 train_seconds = float(time.perf_counter() - t0)
-            except Exception:
+            except Exception as exc:
+                record["status"] = "failed"
+                record["error"] = f"fit failed: {exc}"
                 continue
+            record["status"] = "ok"
+            record["error"] = ""
             need_plot_data = (
                 problem_type == "regression"
                 and cfg.output.generate_plots
@@ -1351,9 +1638,7 @@ def run_automl(config_path: Path) -> None:
                 except Exception:
                     test_metrics = {}
                     test_metrics_std = {}
-            # Safe name for file outputs
-            safe_name = f"{model_label.replace(' ', '_').replace('(', '').replace(')', '').replace('+', '_')}_{preproc_name.replace('|', '_')}"
-            # Classification diagnostics: confusion matrix (saved as PNG/CSV, best-effort).
+            # Classification diagnostics: confusion matrix / ROC / PR (saved as PNG/CSV, best-effort).
             if problem_type == "classification" and cfg.output.generate_plots and y_pred_train is not None:
                 try:
                     y_true_cm = np.asarray(y_test) if y_pred_test is not None else y_train_array
@@ -1372,7 +1657,8 @@ def run_automl(config_path: Path) -> None:
                             labels = list(pd.unique(pd.Series(list(y_true_cm) + list(y_pred_cm))))
                         except Exception:
                             labels = None
-                    cm_paths = save_confusion_matrices(
+
+                    save_confusion_matrices(
                         y_true=y_true_cm,
                         y_pred=y_pred_cm,
                         labels=labels,
@@ -1380,25 +1666,6 @@ def run_automl(config_path: Path) -> None:
                         base_name=safe_name,
                         title_prefix=f"{model_label} ({preproc_name}) - ",
                     )
-                    if clearml_mgr.logger:
-                        try:
-                            if cm_paths.confusion_png:
-                                clearml_mgr.logger.report_image(
-                                    title=f"confusion_{model_label} ({preproc_name})",
-                                    series="confusion_matrix_models",
-                                    local_path=str(cm_paths.confusion_png),
-                                )
-                        except Exception:
-                            pass
-                        try:
-                            if cm_paths.confusion_normalized_png:
-                                clearml_mgr.logger.report_image(
-                                    title=f"confusion_norm_{model_label} ({preproc_name})",
-                                    series="confusion_matrix_normalized_models",
-                                    local_path=str(cm_paths.confusion_normalized_png),
-                                )
-                        except Exception:
-                            pass
 
                     # ROC / PR curves (only when score metric is requested; best-effort).
                     try:
@@ -1419,7 +1686,7 @@ def run_automl(config_path: Path) -> None:
                                     except Exception:
                                         scores_curve = None
                             if scores_curve is not None:
-                                curve_paths = save_roc_pr_curves(
+                                save_roc_pr_curves(
                                     y_true=y_true_cm,
                                     scores=scores_curve,
                                     classes=labels,
@@ -1428,63 +1695,11 @@ def run_automl(config_path: Path) -> None:
                                     base_name=safe_name,
                                     title_prefix=f"{model_label} ({preproc_name}) - ",
                                 )
-                                if clearml_mgr.logger:
-                                    try:
-                                        if curve_paths.roc_png:
-                                            clearml_mgr.logger.report_image(
-                                                title=f"roc_{model_label} ({preproc_name})",
-                                                series="roc_curve_models",
-                                                local_path=str(curve_paths.roc_png),
-                                            )
-                                    except Exception:
-                                        pass
-                                    try:
-                                        if curve_paths.pr_png:
-                                            clearml_mgr.logger.report_image(
-                                                title=f"pr_{model_label} ({preproc_name})",
-                                                series="pr_curve_models",
-                                                local_path=str(curve_paths.pr_png),
-                                            )
-                                    except Exception:
-                                        pass
                     except Exception:
                         pass
                 except Exception:
                     pass
-            # Summary scatter/hist in training-summary task (ClearML scatter2d/hist)
-            if clearml_mgr.logger and y_pred_for_plots is not None:
-                try:
-                    if Scatter2D:
-                        scatter = Scatter2D(mode=Scatter2D.Mode.markers, x=y_train_array.tolist(), y=y_pred_for_plots.tolist())
-                        clearml_mgr.logger.report_scatter2d(
-                            title=f"{model_label} y_true vs y_pred",
-                            series=model_label,
-                            iteration=0,
-                            scatter=scatter,
-                        )
-                        # 45 degree and regression line
-                        min_val = float(min(np.min(y_train_array), np.min(y_pred_for_plots)))
-                        max_val = float(max(np.max(y_train_array), np.max(y_pred_for_plots)))
-                        reg_line_x = [min_val, max_val]
-                        try:
-                            coef = np.polyfit(y_train_array, y_pred_for_plots, 1)
-                            reg_line_y = [coef[0] * min_val + coef[1], coef[0] * max_val + coef[1]]
-                        except Exception:
-                            reg_line_y = reg_line_x
-                        clearml_mgr.logger.report_scatter2d(
-                            title=f"{model_label} y_true vs y_pred",
-                            series=f"{model_label}_ideal",
-                            iteration=0,
-                            scatter=Scatter2D(mode=Scatter2D.Mode.lines, x=reg_line_x, y=reg_line_x),
-                        )
-                        clearml_mgr.logger.report_scatter2d(
-                            title=f"{model_label} y_true vs y_pred",
-                            series=f"{model_label}_regline",
-                            iteration=0,
-                            scatter=Scatter2D(mode=Scatter2D.Mode.lines, x=reg_line_x, y=reg_line_y),
-                        )
-                except Exception:
-                    pass
+
             # Interpolation / feature space plot (PCA on transformed features)
             interp_path = visual_interp_dir / f"{safe_name}.png"
             proj_csv_path = visual_interp_dir / "feature_space_projection.csv"
@@ -1682,6 +1897,160 @@ def run_automl(config_path: Path) -> None:
             except Exception:
                 pass
             model_task_mgr.register_output_model(model_path, name=model_label)
+
+            # -----------------------------------------------------------------
+            # Interpretation (per-model): Feature Importance / SHAP
+            # - Report as Plotly into the per-model task (ClearML Plots)
+            # - Save PNG/CSV under output_dir for artifacts
+            # -----------------------------------------------------------------
+            if cfg.visualizations.feature_importance:
+                try:
+                    try:
+                        fitted_preprocessor = pipeline_best.named_steps["preprocessor"]
+                        fnames = fitted_preprocessor.get_feature_names_out()
+                    except Exception:
+                        fitted_preprocessor = pipeline_best.named_steps["preprocessor"]
+                        xt = fitted_preprocessor.transform(X_train)
+                        fnames = [f"f{i}" for i in range(xt.shape[1])]
+                    imp_df = extract_feature_importance(pipeline_best.named_steps["model"], list(fnames))
+                    if imp_df is not None and not imp_df.empty:
+                        fi_plot_path = visual_fi_dir / f"{safe_name}.png"
+                        plot_feature_importance(
+                            imp_df,
+                            fi_plot_path,
+                            title=f"Feature Importance: {model_label} ({preproc_name})",
+                        )
+                        try:
+                            imp_df.to_csv(visual_fi_dir / f"{safe_name}.csv", index=False)
+                        except Exception:
+                            pass
+
+                        if model_task_mgr.logger:
+                            try:
+                                import plotly.express as px  # type: ignore
+
+                                top_imp = imp_df.head(30).copy()
+                                top_imp = top_imp.sort_values(by="importance", ascending=True)
+                                fig = px.bar(
+                                    top_imp,
+                                    x="importance",
+                                    y="feature",
+                                    orientation="h",
+                                    title=f"Feature Importance: {model_label} ({preproc_name})",
+                                )
+                                model_task_mgr.logger.report_plotly(
+                                    title="02_interpretability",
+                                    series="feature_importance",
+                                    iteration=0,
+                                    figure=fig,
+                                )
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
+            if cfg.visualizations.shap_summary:
+                # Prefer Plotly summary (mean abs SHAP per feature). Only fall back to PNG when that fails.
+                shap_imp_df = None
+                try:
+                    shap_imp_df = compute_shap_importance(
+                        pipeline_best,
+                        X_train,
+                        max_display=30,
+                        sample_size=200,
+                    )
+                except Exception:
+                    shap_imp_df = None
+
+                if shap_imp_df is not None and not shap_imp_df.empty:
+                    try:
+                        shap_imp_df.to_csv(visual_shap_dir / f"{safe_name}_importance.csv", index=False)
+                    except Exception:
+                        pass
+                    if model_task_mgr.logger:
+                        try:
+                            import plotly.express as px  # type: ignore
+
+                            df_bar = shap_imp_df.sort_values(by="shap_importance", ascending=True)
+                            fig = px.bar(
+                                df_bar,
+                                x="shap_importance",
+                                y="feature",
+                                orientation="h",
+                                title=f"SHAP (mean |value|): {model_label} ({preproc_name})",
+                            )
+                            model_task_mgr.logger.report_plotly(
+                                title="02_interpretability",
+                                series="shap_summary",
+                                iteration=0,
+                                figure=fig,
+                            )
+                        except Exception:
+                            pass
+            # Ensure plot artifacts exist before uploading/logging to ClearML.
+            if problem_type == "regression" and cfg.output.generate_plots:
+                if cfg.visualizations.predicted_vs_actual and y_pred_for_plots is not None:
+                    scatter_path = visual_pred_dir / f"{safe_name}.png"
+                    try:
+                        plot_predicted_vs_actual(
+                            pipeline_best,
+                            X_train,
+                            y_train,
+                            scatter_path,
+                            title=f"{model_label} ({preproc_name})",
+                            predictions=y_pred_for_plots,
+                            r2_override=r2_for_plots,
+                            add_regression_line=True,
+                        )
+                        if residuals_for_plots is not None:
+                            pd.DataFrame(
+                                {
+                                    "actual": y_train_array,
+                                    "predicted": y_pred_for_plots,
+                                    "residual": residuals_for_plots,
+                                    "split": "train",
+                                }
+                            ).to_csv(scatter_path.with_suffix(".csv"), index=False)
+                    except Exception:
+                        pass
+                if cfg.visualizations.residual_scatter and y_pred_for_plots is not None and residuals_for_plots is not None:
+                    resid_scatter_path = visual_resid_scatter_dir / f"{safe_name}.png"
+                    try:
+                        plot_residual_scatter(
+                            pipeline_best,
+                            X_train,
+                            y_train,
+                            resid_scatter_path,
+                            title=f"Residual scatter: {model_label} ({preproc_name})",
+                            predictions=y_pred_for_plots,
+                            residuals=residuals_for_plots,
+                        )
+                        pd.DataFrame(
+                            {
+                                "predicted": y_pred_for_plots,
+                                "residual": residuals_for_plots,
+                                "split": "train",
+                            }
+                        ).to_csv(resid_scatter_path.with_suffix(".csv"), index=False)
+                    except Exception:
+                        pass
+                if cfg.visualizations.residual_hist and residuals_for_plots is not None:
+                    resid_hist_path = visual_resid_hist_dir / f"{safe_name}.png"
+                    try:
+                        plot_residual_hist(
+                            pipeline_best,
+                            X_train,
+                            y_train,
+                            resid_hist_path,
+                            title=f"Residual histogram: {model_label} ({preproc_name})",
+                            residuals=residuals_for_plots,
+                        )
+                        pd.DataFrame({"residual": residuals_for_plots, "split": "train"}).to_csv(
+                            resid_hist_path.with_suffix(".csv"), index=False
+                        )
+                    except Exception:
+                        pass
+
             try:
                 related_paths = [
                     visual_pred_dir / f"{safe_name}.png",
@@ -1700,7 +2069,9 @@ def run_automl(config_path: Path) -> None:
                     visual_pr_dir / f"{safe_name}.png",
                     visual_pr_dir / f"{safe_name}.csv",
                     visual_fi_dir / f"{safe_name}.png",
+                    visual_fi_dir / f"{safe_name}.csv",
                     visual_shap_dir / f"{safe_name}.png",
+                    visual_shap_dir / f"{safe_name}_importance.csv",
                 ]
                 model_task_mgr.upload_artifacts([p for p in related_paths if p.exists()])
             except Exception:
@@ -1754,8 +2125,13 @@ def run_automl(config_path: Path) -> None:
                 ]:
                     if img_path.exists():
                         try:
+                            title = (
+                                "02_interpretability"
+                                if series_name in {"feature_importance", "shap_summary"}
+                                else "01_performance"
+                            )
                             model_task_mgr.logger.report_image(
-                                title=img_path.stem,
+                                title=title,
                                 series=series_name,
                                 local_path=str(img_path),
                             )
@@ -1764,12 +2140,12 @@ def run_automl(config_path: Path) -> None:
                                 fig = build_plotly_pred_vs_actual(
                                     y_train_array,
                                     y_pred_for_plots,
-                                    title=img_path.stem,
+                                    title=f"{model_label} ({preproc_name})",
                                     add_regression_line=True,
                                 )
                                 if fig is not None:
                                     model_task_mgr.logger.report_plotly(
-                                        title=img_path.stem,
+                                        title=title,
                                         series=series_name,
                                         iteration=0,
                                         figure=fig,
@@ -1778,11 +2154,11 @@ def run_automl(config_path: Path) -> None:
                                 fig = build_plotly_residual_scatter(
                                     y_pred_for_plots,
                                     residuals_for_plots,
-                                    title=img_path.stem,
+                                    title=f"{model_label} ({preproc_name})",
                                 )
                                 if fig is not None:
                                     model_task_mgr.logger.report_plotly(
-                                        title=img_path.stem,
+                                        title=title,
                                         series=series_name,
                                         iteration=0,
                                         figure=fig,
@@ -1791,11 +2167,11 @@ def run_automl(config_path: Path) -> None:
                                 fig = build_plotly_histogram(
                                     residuals_for_plots.tolist(),
                                     metric_name="residual",
-                                    title=img_path.stem,
+                                    title=f"{model_label} ({preproc_name})",
                                 )
                                 if fig is not None:
                                     model_task_mgr.logger.report_plotly(
-                                        title=img_path.stem,
+                                        title=title,
                                         series=series_name,
                                         iteration=0,
                                         figure=fig,
@@ -1806,11 +2182,11 @@ def run_automl(config_path: Path) -> None:
                                     fig = build_plotly_interpolation_space(
                                         Xt_full,
                                         y_train_array,
-                                        title=img_path.stem,
+                                        title=f"{model_label} ({preproc_name})",
                                     )
                                     if fig is not None:
                                         model_task_mgr.logger.report_plotly(
-                                            title=img_path.stem,
+                                            title=title,
                                             series=series_name,
                                             iteration=0,
                                             figure=fig,
@@ -1846,21 +2222,32 @@ def run_automl(config_path: Path) -> None:
                 if plot_rows:
                     debug_rows.extend(plot_rows)
                 if debug_rows:
-                    model_task_mgr.report_table("DEbugsamples", pd.DataFrame(debug_rows), series="DEbugsamples")
+                    model_task_mgr.report_table("99_debug/debug_samples", pd.DataFrame(debug_rows), series="debug")
             except Exception:
                 pass
             # Record task link for summary table
             try:
                 task_url = None
-                if model_task_mgr.task and hasattr(model_task_mgr.task, "get_output_log_web_page"):
-                    task_url = model_task_mgr.task.get_output_log_web_page()
-                record = {
-                    "model": model_label,
-                    "preprocessor": preproc_name,
-                    "task_id": model_task_mgr.task.id if model_task_mgr.task else "",
-                    "url": task_url or "",
-                    "link_html": f'<a href="{task_url}">{model_label} ({preproc_name})</a>' if task_url else "",
-                }
+                try:
+                    if model_task_mgr.task and hasattr(model_task_mgr.task, "get_output_log_web_page"):
+                        task_url = model_task_mgr.task.get_output_log_web_page()
+                except Exception:
+                    task_url = None
+                record.update(
+                    {
+                        "train_seconds": train_seconds,
+                        "predict_seconds": predict_seconds,
+                        "predict_train_seconds": predict_train_seconds,
+                        "predict_test_seconds": predict_test_seconds,
+                        "model_size_bytes": model_size_bytes,
+                        "num_features": n_features_transformed,
+                        "task_id": model_task_mgr.task.id if model_task_mgr.task else "",
+                        "url": task_url or "",
+                        "link_html": f'<a href="{task_url}">{model_label} ({preproc_name})</a>' if task_url else "",
+                        "status": "ok",
+                        "error": "",
+                    }
+                )
                 try:
                     has_test_metrics = False
                     try:
@@ -1875,16 +2262,35 @@ def run_automl(config_path: Path) -> None:
                     record.update({k: v for k, v in metrics_for_record.items()})
                 except Exception:
                     pass
-                model_task_records.append(record)
             except Exception:
                 pass
-            if model_task_mgr.task:
-                training_task_ids.append(model_task_mgr.task.id)
+            try:
+                if model_task_mgr and getattr(model_task_mgr, "task", None):
+                    training_task_ids.append(model_task_mgr.task.id)
+            except Exception:
+                pass
+        except Exception as exc:
+            try:
+                record["status"] = "failed"
+                record["error"] = f"unexpected error: {exc}"
+            except Exception:
+                record = {"model": model_label, "status": "failed", "error": f"unexpected error: {exc}"}
+            continue
         finally:
             if model_task_mgr:
                 model_task_mgr.close()
+            try:
+                err = record.get("error")
+                if err is not None:
+                    err_s = str(err)
+                    if len(err_s) > 1000:
+                        record["error"] = err_s[:1000] + "..."
+            except Exception:
+                pass
+            if isinstance(record, dict) and record:
+                model_task_records.append(record)
         # Visualizations (also mirrored to training-summary task for summary)
-        if problem_type == "regression" and cfg.output.generate_plots:
+        if summary_plots_mode == "all" and problem_type == "regression" and cfg.output.generate_plots:
             # Predicted vs actual
             if cfg.visualizations.predicted_vs_actual:
                 scatter_path = visual_pred_dir / f"{safe_name}.png"
@@ -2070,60 +2476,6 @@ def run_automl(config_path: Path) -> None:
                             pass
                 except Exception:
                     pass
-        # Feature importance per model
-        if cfg.visualizations.feature_importance:
-            try:
-                # Get feature names
-                try:
-                    fitted_preprocessor = pipeline_best.named_steps["preprocessor"]
-                    fnames = fitted_preprocessor.get_feature_names_out()
-                except Exception:
-                    fitted_preprocessor = pipeline_best.named_steps["preprocessor"]
-                    xt = fitted_preprocessor.transform(X_train)
-                    fnames = [f"f{i}" for i in range(xt.shape[1])]
-                imp_df = extract_feature_importance(pipeline_best.named_steps["model"], list(fnames))
-                if imp_df is not None:
-                    fi_plot_path = visual_fi_dir / f"{safe_name}.png"
-                    plot_feature_importance(imp_df, fi_plot_path, title=f"Feature Importance: {model_label} ({preproc_name})")
-                    if clearml_mgr.logger and fi_plot_path.exists():
-                        try:
-                            clearml_mgr.logger.report_image(
-                                title=f"fi_{model_label}",
-                                series="feature_importance",
-                                local_path=str(fi_plot_path),
-                            )
-                            try:
-                                import plotly.express as px  # type: ignore
-
-                                fig = px.bar(imp_df, x="feature", y="importance", title=f"Feature Importance: {model_label}")
-                                clearml_mgr.logger.report_plotly(
-                                    title=f"fi_{model_label}",
-                                    series="feature_importance",
-                                    iteration=0,
-                                    figure=fig,
-                                )
-                            except Exception:
-                                pass
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-        # SHAP summary per model
-        if cfg.visualizations.shap_summary:
-            try:
-                shap_plot_path = visual_shap_dir / f"{safe_name}.png"
-                plot_shap_summary(pipeline_best, X_train, shap_plot_path)
-                if clearml_mgr.logger and shap_plot_path.exists():
-                    try:
-                        clearml_mgr.logger.report_image(
-                            title=f"shap_{model_label}",
-                            series="shap_summary",
-                            local_path=str(shap_plot_path),
-                        )
-                    except Exception:
-                        pass
-            except Exception:
-                pass
         # Save predictions and metrics CSV artifacts
         try:
             preds_rows = []
@@ -2169,78 +2521,525 @@ def run_automl(config_path: Path) -> None:
             metrics_df.to_csv(metrics_path, index=False)
         except Exception:
             pass
-    # Record links to per-model tasks for debugging / navigation
-    try:
-        df_links = pd.DataFrame(model_task_records) if model_task_records else pd.DataFrame()
-        if not df_links.empty:
+    # Record links to per-model tasks for navigation (ClearML on/off).
+    df_links = pd.DataFrame(model_task_records) if model_task_records else pd.DataFrame()
+    df_links_ranked: Optional[pd.DataFrame] = None
+    if not df_links.empty:
+        try:
+            df_links.to_csv(output_dir / "model_metrics.csv", index=False)
+        except Exception:
+            pass
+        try:
+            df_fail = df_links.copy()
+            status_bad = pd.Series([False] * len(df_fail))
+            error_bad = pd.Series([False] * len(df_fail))
             try:
-                df_links.to_csv(output_dir / "model_metrics.csv", index=False)
+                if "status" in df_fail.columns:
+                    st = df_fail["status"].fillna("").astype(str).str.strip().str.lower()
+                    status_bad = ~st.isin(["", "ok"])
+            except Exception:
+                status_bad = pd.Series([False] * len(df_fail))
+            try:
+                if "error" in df_fail.columns:
+                    er = df_fail["error"].fillna("").astype(str).str.strip()
+                    error_bad = er != ""
+            except Exception:
+                error_bad = pd.Series([False] * len(df_fail))
+            df_fail = df_fail[status_bad | error_bad]
+            if not df_fail.empty:
+                df_fail.to_csv(output_dir / "model_task_failures.csv", index=False)
+        except Exception:
+            pass
+
+    # Persist recommended model summary to output_dir (ClearML on/off).
+    recommended_df = None
+    training_primary_metric = str(primary_metric_model).strip().lower() if primary_metric_model else ""
+    recommend_metric = training_primary_metric
+    recommend_goal = (
+        "min" if (recommend_metric and is_loss_metric(recommend_metric, problem_type=problem_type)) else "max"
+    )
+    recommend_source = "training_primary_metric"
+    recommendation_mode = "auto"
+    try:
+        if cfg.clearml and getattr(cfg.clearml, "recommendation_mode", None):
+            recommendation_mode = str(cfg.clearml.recommendation_mode).strip().lower()
+    except Exception:
+        recommendation_mode = "auto"
+    if recommendation_mode not in {"auto", "training", "comparison"}:
+        recommendation_mode = "auto"
+    use_comparison_ranking = bool(
+        recommendation_mode == "comparison" or (recommendation_mode == "auto" and embed_comparison)
+    )
+    ranking_metrics: List[str] = []
+    composite_enabled = True
+    composite_metrics = None
+    composite_weights = None
+    composite_require_all = False
+    try:
+        # If comparison is embedded, reuse comparison ranking settings for recommendation
+        # (e.g., composite_score) so the dashboard is consistent.
+        if use_comparison_ranking:
+            try:
+                from automl_lib.config.loaders import load_comparison_config
+
+                cmp_cfg = None
+                cmp_path = os.environ.get("AUTO_ML_COMPARISON_CONFIG_PATH")
+                if cmp_path:
+                    cmp_cfg = load_comparison_config(Path(str(cmp_path)))
+                else:
+                    default_cmp = Path("config_comparison.yaml")
+                    if default_cmp.exists():
+                        cmp_cfg = load_comparison_config(default_cmp)
+                    else:
+                        cmp_cfg = load_comparison_config(config_path)
+                ranking_cfg = getattr(cmp_cfg, "ranking", None) if cmp_cfg else None
+
+                try:
+                    if ranking_cfg and getattr(ranking_cfg, "metrics", None):
+                        ranking_metrics = [
+                            str(m).strip().lower() for m in (ranking_cfg.metrics or []) if str(m).strip()
+                        ]
+                except Exception:
+                    ranking_metrics = []
+                if not ranking_metrics:
+                    try:
+                        if (
+                            cmp_cfg
+                            and getattr(cmp_cfg, "clearml", None)
+                            and getattr(cmp_cfg.clearml, "comparison_metrics", None)
+                        ):
+                            ranking_metrics = [
+                                str(m).strip().lower()
+                                for m in (cmp_cfg.clearml.comparison_metrics or [])
+                                if str(m).strip()
+                            ]
+                    except Exception:
+                        ranking_metrics = []
+
+                try:
+                    pm = str(getattr(ranking_cfg, "primary_metric", "") or "").strip().lower()
+                    if pm:
+                        recommend_metric = pm
+                        recommend_source = "comparison_ranking"
+                except Exception:
+                    pass
+
+                try:
+                    explicit_goal = getattr(ranking_cfg, "goal", None)
+                    if explicit_goal:
+                        recommend_goal = str(explicit_goal).strip().lower()
+                except Exception:
+                    pass
+                if recommend_metric and recommend_goal not in {"min", "max"}:
+                    recommend_goal = (
+                        "min" if is_loss_metric(recommend_metric, problem_type=problem_type) else "max"
+                    )
+
+                composite_cfg = getattr(ranking_cfg, "composite", None) if ranking_cfg else None
+                if composite_cfg:
+                    try:
+                        composite_enabled = bool(getattr(composite_cfg, "enabled", True))
+                    except Exception:
+                        composite_enabled = True
+                    try:
+                        composite_require_all = bool(getattr(composite_cfg, "require_all_metrics", False))
+                    except Exception:
+                        composite_require_all = False
+                    try:
+                        composite_metrics = list(getattr(composite_cfg, "metrics", []) or [])
+                    except Exception:
+                        composite_metrics = None
+                    try:
+                        composite_weights = dict(getattr(composite_cfg, "weights", {}) or {})
+                    except Exception:
+                        composite_weights = None
             except Exception:
                 pass
 
-        # Always persist recommended model summary to output_dir (ClearML on/off).
-        recommended_df = None
-        try:
-            metric_key = str(primary_metric_model).strip().lower() if primary_metric_model else ""
-            if not df_links.empty and metric_key and metric_key in df_links.columns:
-                vals = pd.to_numeric(df_links[metric_key], errors="coerce")
-                if vals.notna().any():
-                    minimize_metrics = {"mse", "rmse", "mae", "mape", "smape", "logloss", "loss", "error"}
-                    goal = "min" if metric_key in minimize_metrics else "max"
-                    best_idx = vals.idxmin() if goal == "min" else vals.idxmax()
-                    best_row = df_links.loc[best_idx].to_dict()
+        if not df_links.empty and recommend_metric:
+            df_rank = df_links.copy()
+            # Compute composite_score (if needed) using the same logic as comparison phase.
+            try:
+                from automl_lib.phases.comparison.meta import build_comparison_metadata
+
+                if (recommend_metric == "composite_score") or composite_enabled:
+                    meta_rank = build_comparison_metadata(
+                        df_rank.to_dict(orient="records"),
+                        output_dir=None,
+                        metric_cols=ranking_metrics or None,
+                        primary_metric=(recommend_metric or None),
+                        goal=(recommend_goal if recommend_source == "comparison_ranking" else None),
+                        group_col=None,
+                        top_k=None,
+                        composite_enabled=composite_enabled,
+                        composite_metrics=composite_metrics,
+                        composite_weights=composite_weights,
+                        composite_require_all=composite_require_all,
+                    )
+                    if isinstance(meta_rank.get("ranked_df"), pd.DataFrame):
+                        df_rank = meta_rank["ranked_df"]
+            except Exception:
+                pass
+
+            # If composite_score is requested but cannot be computed, fall back.
+            if recommend_metric == "composite_score" and "composite_score" not in df_rank.columns:
+                if training_primary_metric and training_primary_metric in df_rank.columns:
+                    recommend_metric = training_primary_metric
+                    recommend_source = "training_primary_metric_fallback"
+                    recommend_goal = (
+                        "min"
+                        if is_loss_metric(training_primary_metric, problem_type=problem_type)
+                        else "max"
+                    )
+            if recommend_metric not in df_rank.columns:
+                if training_primary_metric and training_primary_metric in df_rank.columns:
+                    recommend_metric = training_primary_metric
+                    recommend_source = "training_primary_metric_fallback"
+                    recommend_goal = (
+                        "min"
+                        if is_loss_metric(training_primary_metric, problem_type=problem_type)
+                        else "max"
+                    )
+
+            if recommend_metric in df_rank.columns:
+                try:
+                    if "status" in df_rank.columns:
+                        status_norm = df_rank["status"].fillna("").astype(str).str.strip().str.lower()
+                        df_rank = df_rank[status_norm.isin(["ok", ""])]
+                except Exception:
+                    pass
+                df_rank["_metric"] = pd.to_numeric(df_rank[recommend_metric], errors="coerce")
+                df_rank["_train_seconds"] = pd.to_numeric(df_rank.get("train_seconds"), errors="coerce")
+                df_rank["_predict_seconds"] = pd.to_numeric(df_rank.get("predict_seconds"), errors="coerce")
+                df_rank["_model_size_bytes"] = pd.to_numeric(df_rank.get("model_size_bytes"), errors="coerce")
+                df_rank["_num_features"] = pd.to_numeric(df_rank.get("num_features"), errors="coerce")
+                df_rank = df_rank[df_rank["_metric"].notna()]
+                if not df_rank.empty:
+                    ascending = [recommend_goal == "min", True, True, True, True]
+                    sort_cols = ["_metric", "_train_seconds", "_predict_seconds", "_model_size_bytes", "_num_features"]
+                    df_rank = df_rank.sort_values(by=sort_cols, ascending=ascending, na_position="last")
+                    best_row = df_rank.iloc[0].to_dict()
+                    try:
+                        df_links_ranked = df_rank.copy().reset_index(drop=True)
+                        helper_cols = [c for c in df_links_ranked.columns if str(c).startswith("_")]
+                        if helper_cols:
+                            df_links_ranked = df_links_ranked.drop(columns=helper_cols, errors="ignore")
+                        df_links_ranked.insert(0, "rank", range(1, len(df_links_ranked) + 1))
+
+                        rec_task_id = str(best_row.get("task_id") or "").strip()
+                        rec_model = str(best_row.get("model") or "").strip()
+                        rec_preproc = str(best_row.get("preprocessor") or "").strip()
+                        is_rec = pd.Series([False] * len(df_links_ranked))
+                        try:
+                            if rec_task_id and "task_id" in df_links_ranked.columns:
+                                is_rec = df_links_ranked["task_id"].astype(str) == rec_task_id
+                            elif rec_model and "model" in df_links_ranked.columns and "preprocessor" in df_links_ranked.columns:
+                                is_rec = (df_links_ranked["model"].astype(str) == rec_model) & (
+                                    df_links_ranked["preprocessor"].astype(str) == rec_preproc
+                                )
+                        except Exception:
+                            is_rec = pd.Series([False] * len(df_links_ranked))
+                        df_links_ranked.insert(1, "is_recommended", is_rec.astype(bool))
+
+                        preferred_cols = [
+                            "rank",
+                            "is_recommended",
+                            "model",
+                            "preprocessor",
+                            "metric_source",
+                            recommend_metric,
+                            "composite_score",
+                            training_primary_metric if training_primary_metric else "",
+                            "train_seconds",
+                            "predict_seconds",
+                            "model_size_bytes",
+                            "num_features",
+                            "task_id",
+                            "url",
+                        ]
+                        ordered_cols = []
+                        for c in preferred_cols:
+                            if c and c in df_links_ranked.columns and c not in ordered_cols:
+                                ordered_cols.append(c)
+                        for c in df_links_ranked.columns:
+                            if c not in ordered_cols:
+                                ordered_cols.append(c)
+                        df_links_ranked = df_links_ranked[ordered_cols]
+                        try:
+                            df_links_ranked.to_csv(output_dir / "model_tasks_ranked.csv", index=False)
+                        except Exception:
+                            pass
+                    except Exception:
+                        df_links_ranked = None
                     recommended = {
                         "run_id": run_id,
                         "dataset_key": dataset_key,
-                        "primary_metric": metric_key,
-                        "goal": goal,
+                        "training_primary_metric": training_primary_metric,
+                        "primary_metric": recommend_metric,
+                        "goal": recommend_goal,
+                        "recommendation_mode": recommendation_mode,
+                        "ranking_source": recommend_source,
                         "metric_source": best_row.get("metric_source", ""),
                         "model": best_row.get("model", ""),
                         "preprocessor": best_row.get("preprocessor", ""),
-                        metric_key: best_row.get(metric_key),
+                        recommend_metric: best_row.get(recommend_metric),
+                        "train_seconds": best_row.get("train_seconds"),
+                        "predict_seconds": best_row.get("predict_seconds"),
+                        "model_size_bytes": best_row.get("model_size_bytes"),
+                        "num_features": best_row.get("num_features"),
                         "task_id": best_row.get("task_id", ""),
                         "url": best_row.get("url", ""),
                         "link_html": best_row.get("link_html", ""),
                     }
+                    # Include ranking metrics + composite_score for transparency.
+                    metrics_to_show = list(ranking_metrics or [])
+                    if "composite_score" in best_row and "composite_score" not in metrics_to_show:
+                        metrics_to_show.append("composite_score")
+                    for m in metrics_to_show:
+                        key = str(m).strip().lower()
+                        if not key or key in recommended:
+                            continue
+                        if key in best_row:
+                            recommended[key] = best_row.get(key)
                     recommended_df = pd.DataFrame([recommended])
                     try:
                         recommended_df.to_csv(output_dir / "recommended_model.csv", index=False)
                     except Exception:
                         pass
-        except Exception:
-            recommended_df = None
+                    # Persist recommendation rationale (config + selected row) for transparency.
+                    try:
+                        rationale_row = recommended_df.iloc[0].to_dict()
+                    except Exception:
+                        rationale_row = {}
+                    rationale = {
+                        "run_id": run_id,
+                        "dataset_key": dataset_key,
+                        "comparison_mode": (getattr(cfg.clearml, "comparison_mode", "disabled") if cfg.clearml else "disabled"),
+                        "recommendation_mode": recommendation_mode,
+                        "training_primary_metric": training_primary_metric,
+                        "recommend_metric": recommend_metric,
+                        "recommend_goal": recommend_goal,
+                        "ranking_source": recommend_source,
+                        "ranking_metrics": ranking_metrics,
+                        "composite_enabled": composite_enabled,
+                        "composite_metrics": composite_metrics,
+                        "composite_weights": composite_weights,
+                        "composite_require_all": composite_require_all,
+                        "selected": rationale_row,
+                        "comparison_config_path": os.environ.get("AUTO_ML_COMPARISON_CONFIG_PATH") or "",
+                    }
+                    try:
+                        import json as _json
 
-        if clearml_mgr.logger and not df_links.empty:
-            clearml_mgr.report_table("DEbugsamples", df_links, series="DEbugsamples")
-            clearml_mgr.report_table("model_metrics", df_links, series="metrics")
-            if recommended_df is not None and not recommended_df.empty:
-                clearml_mgr.report_table("recommended_model", recommended_df, series="summary")
+                        (output_dir / "recommendation_rationale.json").write_text(
+                            _json.dumps(rationale, ensure_ascii=False, indent=2, default=str),
+                            encoding="utf-8",
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        md_lines = []
+                        md_lines.append("# Recommendation rationale")
+                        md_lines.append("")
+                        md_lines.append(f"- recommendation_mode: `{recommendation_mode}`")
+                        md_lines.append(f"- ranking_source: `{recommend_source}`")
+                        md_lines.append(f"- recommend_metric: `{recommend_metric}` ({recommend_goal})")
+                        if training_primary_metric:
+                            md_lines.append(f"- training_primary_metric: `{training_primary_metric}`")
+                        if ranking_metrics:
+                            md_lines.append(f"- ranking_metrics: {', '.join(f'`{m}`' for m in ranking_metrics)}")
+                        if composite_weights:
+                            md_lines.append("")
+                            md_lines.append("## Composite weights")
+                            for k, v in composite_weights.items():
+                                md_lines.append(f"- `{k}`: {v}")
+                        md_lines.append("")
+                        md_lines.append("## Selected model")
+                        for key in [
+                            "model",
+                            "preprocessor",
+                            "task_id",
+                            "metric_source",
+                            recommend_metric,
+                            "composite_score",
+                            "train_seconds",
+                            "predict_seconds",
+                            "model_size_bytes",
+                            "num_features",
+                            "url",
+                        ]:
+                            if key in rationale_row and rationale_row.get(key) not in (None, ""):
+                                md_lines.append(f"- {key}: {rationale_row.get(key)}")
+                        (output_dir / "recommendation_rationale.md").write_text(
+                            "\n".join(md_lines).strip() + "\n",
+                            encoding="utf-8",
+                        )
+                    except Exception:
+                        pass
+    except Exception:
+        recommended_df = None
+
+    # ClearML dashboard: show model tasks + recommendation.
+    if clearml_mgr.logger:
+        try:
+            df_tasks_show = None
+            tasks_total = None
+            tasks_shown = None
+            top_k_display = 20
+            if not df_links.empty:
+                df_tasks_all = df_links_ranked if (df_links_ranked is not None and not df_links_ranked.empty) else df_links
                 try:
-                    metric_key = str(primary_metric_model).strip().lower() if primary_metric_model else ""
-                    val_best = float(pd.to_numeric(recommended_df.iloc[0].get(metric_key), errors="coerce"))
+                    tasks_total = int(len(df_tasks_all))
+                except Exception:
+                    tasks_total = None
+                try:
+                    df_tasks_show = df_tasks_all.head(top_k_display) if (tasks_total and tasks_total > top_k_display) else df_tasks_all
+                    tasks_shown = int(len(df_tasks_show))
+                except Exception:
+                    df_tasks_show = df_tasks_all
+                    try:
+                        tasks_shown = int(len(df_tasks_show))
+                    except Exception:
+                        tasks_shown = None
+                clearml_mgr.report_table("02_leaderboard/model_tasks", df_tasks_show, series="leaderboard")
+            if recommended_df is not None and not recommended_df.empty:
+                clearml_mgr.report_table("01_overview/recommended_model", recommended_df, series="overview")
+                try:
+                    val_best = float(pd.to_numeric(recommended_df.iloc[0].get(recommend_metric), errors="coerce"))
                     if val_best == val_best:  # not NaN
-                        clearml_mgr.report_scalar(f"training/best_{metric_key}", "value", val_best, iteration=0)
+                        clearml_mgr.report_scalar(f"01_overview/best_{recommend_metric}", "value", val_best, iteration=0)
                 except Exception:
                     pass
                 try:
-                    link_html = str(recommended_df.iloc[0].get("link_html") or "")
-                    metric_key = str(recommended_df.iloc[0].get("primary_metric") or "")
-                    if link_html:
+                    rationale_md = output_dir / "recommendation_rationale.md"
+                    if rationale_md.exists():
+                        text = rationale_md.read_text(encoding="utf-8")
                         clearml_mgr.logger.report_text(
-                            f"Recommended model:<br/>{link_html}<br/>{metric_key}={recommended_df.iloc[0].get(metric_key)}",
-                            title="recommended_model",
+                            text.replace("\n", "<br/>"),
+                            title="01_overview/recommendation_rationale",
                         )
                 except Exception:
                     pass
-            # Also emit HTML list soリンクを直接クリック可能
+            # Failures table (helps explain missing/filtered candidates)
             try:
-                links_html = "<br/>".join([row["link_html"] for row in model_task_records if row.get("link_html")])
-                if links_html:
-                    clearml_mgr.logger.report_text(f"Model task links:<br/>{links_html}", title="model_task_links")
+                if not df_links.empty:
+                    df_fail = df_links.copy()
+                    status_bad = pd.Series([False] * len(df_fail))
+                    error_bad = pd.Series([False] * len(df_fail))
+                    try:
+                        if "status" in df_fail.columns:
+                            st = df_fail["status"].fillna("").astype(str).str.strip().str.lower()
+                            status_bad = ~st.isin(["", "ok"])
+                    except Exception:
+                        status_bad = pd.Series([False] * len(df_fail))
+                    try:
+                        if "error" in df_fail.columns:
+                            er = df_fail["error"].fillna("").astype(str).str.strip()
+                            error_bad = er != ""
+                    except Exception:
+                        error_bad = pd.Series([False] * len(df_fail))
+                    df_fail = df_fail[status_bad | error_bad]
+                    if not df_fail.empty:
+                        try:
+                            df_fail.to_csv(output_dir / "model_task_failures.csv", index=False)
+                        except Exception:
+                            pass
+                        clearml_mgr.report_table("99_debug/model_task_failures", df_fail.head(50), series="debug")
             except Exception:
                 pass
-    except Exception:
-        pass
+            try:
+                link_lines = []
+                df_links_src = df_tasks_show if isinstance(df_tasks_show, pd.DataFrame) else None
+                if df_links_src is None or df_links_src.empty:
+                    df_links_src = df_links_ranked if isinstance(df_links_ranked, pd.DataFrame) else None
+                if df_links_src is None or df_links_src.empty:
+                    df_links_src = df_links
+                if isinstance(df_links_src, pd.DataFrame) and not df_links_src.empty:
+                    for _, row in df_links_src.iterrows():
+                        link = str(row.get("link_html") or "").strip()
+                        if not link:
+                            continue
+                        try:
+                            rank = int(row.get("rank")) if row.get("rank") is not None else None
+                        except Exception:
+                            rank = None
+                        link_lines.append(f"{rank}. {link}" if rank is not None else link)
+                links_html = "<br/>".join(link_lines)
+                if links_html:
+                    suffix = ""
+                    try:
+                        if tasks_total and tasks_shown and tasks_shown < tasks_total:
+                            suffix = f"<br/>(showing top {tasks_shown} of {tasks_total})"
+                    except Exception:
+                        suffix = ""
+                    clearml_mgr.logger.report_text(
+                        f"Model task links:<br/>{links_html}{suffix}",
+                        title="01_overview/model_task_links",
+                    )
+            except Exception:
+                pass
+        except Exception:
+            pass
+        try:
+            rec_html = ""
+            if recommended_df is not None and not recommended_df.empty:
+                try:
+                    rec_row = recommended_df.iloc[0].to_dict()
+                    rec_html = str(rec_row.get("link_html") or "")
+                    if not rec_html:
+                        rec_html = f"{rec_row.get('model', '')} ({rec_row.get('preprocessor', '')})"
+                except Exception:
+                    rec_html = ""
+            summary_lines = [
+                f"run_id: {run_id}",
+                f"dataset_key: {dataset_key}",
+                f"dataset_id: {dataset_id_for_load or ''}",
+                f"csv_path: {cfg.data.csv_path or ''}",
+                f"problem_type: {problem_type}",
+                f"train_rows: {int(len(X_train))}",
+                f"test_rows: {int(len(X_test)) if X_test is not None else 0}",
+                f"training_primary_metric: {training_primary_metric} ({'min' if (training_primary_metric and is_loss_metric(training_primary_metric, problem_type=problem_type)) else 'max'})",
+                f"recommend_metric: {recommend_metric} ({recommend_goal}) mode={recommendation_mode} source={recommend_source}",
+                f"comparison_mode: {getattr(cfg.clearml, 'comparison_mode', 'disabled') if cfg.clearml else 'disabled'}",
+                f"output_dir: {str(output_dir)}",
+            ]
+            if rec_html:
+                summary_lines.append(f"recommended: {rec_html}")
+            clearml_mgr.logger.report_text("<br/>".join(summary_lines), title="01_overview/run_summary")
+        except Exception:
+            pass
+        if summary_plots_mode == "best":
+            try:
+                if recommended_df is not None and not recommended_df.empty:
+                    rec = recommended_df.iloc[0].to_dict()
+                    rec_model = str(rec.get("model") or "")
+                    rec_preproc = str(rec.get("preprocessor") or "")
+                    rec_safe_name = (
+                        f"{rec_model.replace(' ', '_').replace('(', '').replace(')', '').replace('+', '_')}_"
+                        f"{rec_preproc.replace('|', '_')}"
+                    )
+                    candidates = [
+                        (visual_pred_dir / f"{rec_safe_name}.png", "pred_vs_actual"),
+                        (visual_resid_scatter_dir / f"{rec_safe_name}.png", "residual_scatter"),
+                        (visual_resid_hist_dir / f"{rec_safe_name}.png", "residual_hist"),
+                        (visual_confusion_dir / f"{rec_safe_name}.png", "confusion_matrix"),
+                        (visual_confusion_dir / f"{rec_safe_name}_normalized.png", "confusion_matrix_normalized"),
+                        (visual_roc_dir / f"{rec_safe_name}.png", "roc_curve"),
+                        (visual_pr_dir / f"{rec_safe_name}.png", "pr_curve"),
+                    ]
+                    for img_path, series_name in candidates:
+                        if img_path.exists():
+                            try:
+                                clearml_mgr.logger.report_image(
+                                    title=f"04_best_model/{series_name}",
+                                    series="best_model",
+                                    local_path=str(img_path),
+                                )
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
     # Debugsamples: plot artifact listing for summary task
     try:
         plot_df = build_plot_artifacts_table(output_dir)
@@ -2250,7 +3049,7 @@ def run_automl(config_path: Path) -> None:
             except Exception:
                 pass
             if clearml_mgr.logger:
-                clearml_mgr.report_table("plot_artifacts", plot_df, series="DEbugsamples")
+                clearml_mgr.report_table("99_debug/plot_artifacts", plot_df, series="debug")
     except Exception:
         pass
     # Upload key artifacts to ClearML
@@ -2259,9 +3058,21 @@ def run_automl(config_path: Path) -> None:
         rec_csv = output_dir / "recommended_model.csv"
         if rec_csv.exists():
             artifacts_to_upload.append(rec_csv)
+        rationale_json = output_dir / "recommendation_rationale.json"
+        if rationale_json.exists():
+            artifacts_to_upload.append(rationale_json)
+        rationale_md = output_dir / "recommendation_rationale.md"
+        if rationale_md.exists():
+            artifacts_to_upload.append(rationale_md)
         model_metrics_csv = output_dir / "model_metrics.csv"
         if model_metrics_csv.exists():
             artifacts_to_upload.append(model_metrics_csv)
+        ranked_tasks_csv = output_dir / "model_tasks_ranked.csv"
+        if ranked_tasks_csv.exists():
+            artifacts_to_upload.append(ranked_tasks_csv)
+        failures_csv = output_dir / "model_task_failures.csv"
+        if failures_csv.exists():
+            artifacts_to_upload.append(failures_csv)
         plot_artifacts_csv = output_dir / "plot_artifacts.csv"
         if plot_artifacts_csv.exists():
             artifacts_to_upload.append(plot_artifacts_csv)
@@ -2303,11 +3114,23 @@ def run_automl(config_path: Path) -> None:
         # パイプライン実行中は step wrapper が戻り値(artifact/param)を書き戻すため、ここでは閉じない
         if os.environ.get("AUTO_ML_PIPELINE_ACTIVE") != "1":
             clearml_mgr.close()
+    metrics_for_comparison = model_task_records
+    try:
+        filtered = []
+        for r in model_task_records:
+            if not isinstance(r, dict):
+                continue
+            st = str(r.get("status") or "").strip().lower()
+            if not st or st == "ok":
+                filtered.append(r)
+        metrics_for_comparison = filtered
+    except Exception:
+        metrics_for_comparison = model_task_records
     return {
         "dataset_id": dataset_id_for_load,
         "summary_task_id": clearml_mgr.task.id if clearml_mgr.task else None,
         "training_task_ids": training_task_ids,
-        "metrics": model_task_records,  # 各モデルのメトリクス/リンクを比較フェーズに渡す
+        "metrics": metrics_for_comparison,  # 各モデルのメトリクス/リンクを比較フェーズに渡す
     }
 
 

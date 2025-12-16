@@ -15,7 +15,7 @@ from automl_lib.clearml import (
 from automl_lib.clearml.logging import report_table
 from automl_lib.config.loaders import load_data_editing_config
 from automl_lib.types import DatasetInfo
-from automl_lib.clearml.context import get_run_id_env, resolve_run_id, set_run_id_env
+from automl_lib.clearml.context import get_run_id_env, resolve_run_id, run_scoped_output_dir, set_run_id_env
 from automl_lib.clearml.context import build_run_context, resolve_dataset_key
 from automl_lib.clearml.naming import dataset_name, build_tags
 
@@ -175,7 +175,16 @@ def run_data_editing_processing(
                 except Exception:
                     pass
 
-    out_path = Path(cfg.editing.output_path or "outputs/data_editing/edited.csv")
+    if cfg.editing.output_path:
+        out_path = Path(cfg.editing.output_path)
+    else:
+        base_dir = Path(cfg.editing.output_dir) if cfg.editing.output_dir else Path("outputs/data_editing")
+        out_dir = run_scoped_output_dir(base_dir, run_id)
+        try:
+            filename = Path(str(cfg.editing.output_filename or "edited.csv")).name
+        except Exception:
+            filename = "edited.csv"
+        out_path = out_dir / filename
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df_after.to_csv(out_path, index=False)
 

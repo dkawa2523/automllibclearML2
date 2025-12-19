@@ -58,7 +58,7 @@ def maybe_clone_from_config(cfg: Any, *, phase: str, output_info: Optional[Path]
         pass
     extra_tags.append(f"phase:{phase}")
 
-    from automl_lib.clearml.clone import clone_task
+    from automl_lib.integrations.clearml.clone import clone_task
 
     _, info = clone_task(
         str(template_task_id),

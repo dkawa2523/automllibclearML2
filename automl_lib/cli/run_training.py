@@ -1,7 +1,7 @@
 from pathlib import Path
 import argparse
 
-from automl_lib.phases import run_training
+from automl_lib.workflow import run_training
 from automl_lib.config.loaders import load_training_config
 from automl_lib.cli.common import clearml_avoid_task_reuse, load_json_or_yaml, maybe_clone_from_config, print_and_write_json
 

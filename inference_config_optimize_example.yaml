@@ -1,0 +1,74 @@
+# Optimize inference example (ClearML)
+#
+# - input.mode=optimize のとき:
+#   - 親タスク: inference-summary（探索の要約: TopK / 履歴 / 可視化）
+#   - 子タスク: <project>/Prediction_runs 配下に 全trial の "predict ..." タスク
+#     - それぞれ single 推論と同じ形式で、入力/出力を Artifacts + Plots に保存
+#   - ローカル出力: output_dir/<run_id>/Prediction_runs/rank_XX/input.json|output.json
+#
+# - model_id は training-summary の USER PROPERTIES: recommended_model_id を推奨
+
+run:
+  id: null
+  dataset_key: null
+  user: null
+
+# 推論対象モデル（ClearML Model Registry）
+model_id: ""
+model_name: "best_model"  # 任意（ClearML表示用）
+
+clearml:
+  enabled: true
+  project_name: "AutoML-with-ClearML"
+  task_name: null
+  base_output_uri: null
+  queue: null
+  tags: ["automl", "inference", "optimize"]
+  run_locally: true
+  naming:
+    project_mode: "root"
+    prediction_runs_suffix: "Prediction_runs"
+
+input:
+  mode: "optimize"
+  # (任意) 学習データ範囲プロット用: ClearML Dataset ID（raw / edited / preprocessed）
+  # dataset_id: "CLEARML_DATASET_ID"
+
+  # 探索変数定義（range / values / fixed）
+  variables:
+    - name: age
+      type: int
+      method: range
+      min: 18
+      max: 70
+      step: 1
+
+    - name: income
+      type: float
+      method: range
+      min: 20000
+      max: 200000
+      step: 1000
+
+    - name: education
+      type: categorical
+      method: values
+      values: ["HighSchool", "Bachelor", "Master", "PhD"]
+
+    # 固定値の例:
+    # - name: coupon
+    #   type: bool
+    #   method: fixed
+    #   value: true
+
+  # variables を JSON として外出ししたい場合（variables の代わりに使用）
+  # params_path: "optimize_params.json"
+
+search:
+  method: "tpe"     # grid | random | tpe | cmaes
+  n_trials: 50
+  goal: "max"       # max | min
+  top_k: 10         # inference-summary のTopK表示（子タスクは全trial）
+
+output_dir: "outputs/inference"
+

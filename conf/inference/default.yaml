@@ -1,0 +1,46 @@
+# Default InferenceConfig (Hydra/OmegaConf)
+
+run:
+  id: null
+  dataset_key: null
+  user: null
+
+# Standalone inference requires `model_id` (or `model_path` / one enabled `models[]` entry).
+# In pipeline runs this will be overridden from training output (recommended_model_id).
+model_id: null
+model_name: null
+model_path: null
+model_dir: null
+models: []
+
+clearml:
+  enabled: true
+  project_name: "AutoML-with-ClearML"
+  task_name: null
+  base_output_uri: null
+  queue: null
+  tags: ["automl", "inference"]
+  run_locally: true
+  naming:
+    project_mode: "root"
+    train_models_suffix: "train_models"
+    prediction_runs_suffix: "Prediction_runs"
+
+input:
+  mode: "single"        # single | batch | optimize
+  csv_path: null
+  dataset_id: null
+  single_json: null
+  params_path: null
+  variables: []
+  single:
+    x1: 0.25
+    cat: "pos"
+
+search:
+  method: "tpe"        # grid | random | tpe | cmaes
+  n_trials: 50
+  goal: "min"          # max | min
+  top_k: 10            # optimize の TopK 表示（子タスクは全trial）
+
+output_dir: "outputs/inference"

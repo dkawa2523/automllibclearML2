@@ -60,7 +60,9 @@ Notes
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import time
 import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -81,15 +83,16 @@ from automl_lib.inference import (
     save_matrices_and_scores,
     save_results,
 )
-from automl_lib.clearml import ensure_local_dataset_copy, find_first_csv, init_task, load_input_model
+from automl_lib.integrations.clearml import ensure_local_dataset_copy, find_first_csv, load_input_model
+from automl_lib.integrations.clearml.context import (
+    get_run_id_env,
+    resolve_dataset_key,
+    resolve_run_id,
+    run_scoped_output_dir,
+    set_run_id_env,
+)
 from automl_lib.config.loaders import load_yaml
-from automl_lib.training.clearml_integration import ClearMLManager, build_clearml_config_from_dict
-try:
-    from clearml import Task, TaskTypes, InputModel  # type: ignore
-except Exception:  # pragma: no cover - optional dependency
-    Task = None
-    TaskTypes = None
-    InputModel = None
+from automl_lib.inference.model_utils import _get_required_feature_names, _predict_with_model
 
 try:
     import yaml  # type: ignore
@@ -155,7 +158,6 @@ def _finalize_run(
     output_dir: str,
     prefix: str,
     goal_for_plot: Optional[str],
-    clearml_mgr: Optional[ClearMLManager] = None,
 ) -> None:
     save_results(aggregated, per_model_results, output_dir, prefix)
     print(f"Saved aggregated and per-model results to directory '{output_dir}'.")
@@ -178,30 +180,6 @@ def _finalize_run(
         plot_agreement_heatmap(aggregated, models.keys(), output_dir)
     except Exception as exc:
         warnings.warn(f"Agreement heatmap could not be generated: {exc}")
-    if clearml_mgr:
-        try:
-            clearml_mgr.report_table("inference_aggregated", aggregated, series="predictions")
-            if goal_for_plot:
-                direction = str(goal_for_plot).lower()
-                for model_label in models.keys():
-                    if model_label in aggregated:
-                        values = aggregated[model_label]
-                        best_val = values.min() if direction == "min" else values.max()
-                        if pd.notna(best_val):
-                            clearml_mgr.report_scalar("inference_best", model_label, float(best_val))
-            artifact_paths = [Path(output_dir) / f"{prefix}_aggregated.csv"]
-            for model_label in per_model_results.keys():
-                model_safe = model_label.replace(" ", "_")
-                artifact_paths.append(Path(output_dir) / f"{prefix}_{model_safe}.csv")
-            artifact_paths.extend([
-                Path(output_dir) / f"{prefix}_correlation_matrix.csv",
-                Path(output_dir) / f"{prefix}_agreement_matrix.csv",
-                Path(output_dir) / f"{prefix}_mean_correlation.csv",
-                Path(output_dir) / f"{prefix}_mean_agreement.csv",
-            ])
-            clearml_mgr.upload_artifacts([p for p in artifact_paths if p.exists()])
-        except Exception:
-            pass
     with pd.option_context("display.max_columns", None):
         print("Aggregated results (first 5 rows):")
         print(aggregated.head())
@@ -213,233 +191,361 @@ def _finalize_run(
             print(agreement_matrix)
 
 
-def _load_models_maybe_clearml(model_dir: Optional[str], models_cfg: Any, clearml_cfg) -> Dict[str, Any]:
-    """Load models either from local joblib directory or ClearML InputModel when model_id is provided."""
-
-    selected_models = _parse_model_names(models_cfg)
-    # If clearml model ids are provided, prefer InputModel
-    clearml_models_cfg = []
-    if isinstance(models_cfg, list):
-        for item in models_cfg:
-            if isinstance(item, dict) and item.get("model_id"):
-                clearml_models_cfg.append(item)
-    if clearml_models_cfg and InputModel is not None and clearml_cfg and clearml_cfg.enabled:
-        models: Dict[str, Any] = {}
-        for item in clearml_models_cfg:
-            name = str(item.get("name"))
-            if not name:
-                continue
-            if selected_models and name not in selected_models:
-                continue
-            model_id = str(item.get("model_id"))
-            try:
-                local_path = load_input_model(model_id)
-                if local_path:
-                    import joblib  # type: ignore
-
-                    models[name] = joblib.load(local_path)
-                    print(f"Loaded model '{name}' from ClearML InputModel id={model_id}")
-            except Exception as exc:
-                print(f"Warning: failed to load InputModel {model_id} ({name}): {exc}")
-        if models:
-            return models
-    # fallback to local joblib
-    return load_models(model_dir, selected_names=selected_models)
-
-
-def _create_child_task(clearml_cfg, parent_task_id: Optional[str], name: str) -> Optional[ClearMLManager]:
-    """Create a child inference task if ClearML is enabled."""
-
-    if not (clearml_cfg and clearml_cfg.enabled and Task and TaskTypes):
-        return None
-    try:
-        task_obj = Task.create(
-            project_name=clearml_cfg.project_name or "AutoML",
-            task_name=name,
-            task_type=getattr(TaskTypes, "inference", None),
-        )
-        if parent_task_id:
-            try:
-                task_obj.add_parent(parent_task_id)
-            except Exception:
-                pass
-        return ClearMLManager(
-            clearml_cfg,
-            task_name=name,
-            task_type="inference",
-            default_project=clearml_cfg.project_name or "AutoML",
-            parent=None,
-            existing_task=task_obj,
-        )
-    except Exception as exc:
-        print(f"Warning: failed to create child inference task {name}: {exc}")
-        return None
-
-
-def _run_from_config(config_data: Dict[str, Any]) -> None:
-    clearml_cfg_raw = config_data.get("clearml") or {}
-    clearml_cfg = build_clearml_config_from_dict(clearml_cfg_raw if isinstance(clearml_cfg_raw, dict) else {})
-
-    model_dir = config_data.get("model_dir")
-    if not model_dir:
-        raise ValueError("'model_dir' must be specified in the configuration")
-    models = _load_models_maybe_clearml(model_dir, config_data.get("models"), clearml_cfg)
-    if not models:
-        print(
-            f"No models were loaded from directory '{model_dir}'. Please check that the directory exists and contains "
-            "joblib files, and that the model names in the configuration match the saved models."
-        )
-        return
-    print(f"Loaded {len(models)} model(s): {', '.join(models.keys())}")
-
-    output_dir = config_data.get("output_dir", "outputs/inference")
-    os.makedirs(output_dir, exist_ok=True)
-    task_name = clearml_cfg.task_name if clearml_cfg else None
-    summary_task_name = task_name or f"inference-summary-{config_data.get('input', {}).get('mode', 'unknown')}"
-
-    parent_task = None
-    clearml_mgr = None
-    if clearml_cfg and clearml_cfg.enabled:
-        parent_id = os.environ.get("AUTO_ML_PARENT_TASK_ID")
-        parent_task = init_task(
-            project=clearml_cfg.project_name or "AutoML",
-            name=summary_task_name,
-            task_type="inference",
-            queue=clearml_cfg.queue,
-            parent=parent_id,
-            tags=clearml_cfg.tags,
-            reuse=False,
-        )
-        clearml_mgr = ClearMLManager(
-            clearml_cfg,
-            task_name=summary_task_name,
-            task_type="inference",
-            default_project=clearml_cfg.project_name or "AutoML",
-            parent=None,
-            existing_task=parent_task,
-        )
-        clearml_mgr.connect_configuration(config_data)
-        parent_task_id = clearml_mgr.task.id if clearml_mgr.task else None
-    else:
-        parent_task_id = None
+def _run_from_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
+    run_cfg = config_data.get("run") if isinstance(config_data.get("run"), dict) else {}
+    run_id = resolve_run_id(from_config=(run_cfg or {}).get("id"), from_env=get_run_id_env())
+    set_run_id_env(run_id)
 
     input_conf = config_data.get("input")
-    if not input_conf or not isinstance(input_conf, dict):
+    if not isinstance(input_conf, dict):
         raise ValueError("'input' section missing or invalid in configuration")
-    mode = input_conf.get("mode")
-    if mode is None:
-        raise ValueError("'mode' must be specified in 'input' section (csv or params)")
-    mode_lower = str(mode).lower()
+    mode = str(input_conf.get("mode") or "single").strip().lower()
+    if mode == "csv":
+        mode = "batch"
+    if mode == "params":
+        mode = "optimize"
+    if mode not in {"single", "batch", "optimize"}:
+        raise ValueError("input.mode must be one of: single, batch, optimize")
 
-    aggregated: pd.DataFrame
-    per_model_results: Dict[str, pd.DataFrame]
-    goal_for_plot: Optional[str] = None
-    prefix = "results"
-    child_mgr: Optional[ClearMLManager] = None
+    output_base = Path(str(config_data.get("output_dir") or "outputs/inference"))
+    output_dir = run_scoped_output_dir(output_base, run_id)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    if mode_lower == "csv":
+    dataset_key = resolve_dataset_key(
+        explicit=(run_cfg or {}).get("dataset_key"),
+        dataset_id=str(input_conf.get("dataset_id")) if input_conf.get("dataset_id") else None,
+        csv_path=(str(input_conf.get("csv_path")) if input_conf.get("csv_path") else None)
+        or (str(input_conf.get("single_json")) if input_conf.get("single_json") else None),
+    )
+
+    # ------------------------------------------------------------------
+    # Resolve a single model (recommended usage: config.model_id)
+    # ------------------------------------------------------------------
+    model_id = config_data.get("model_id")
+    model_name = config_data.get("model_name")
+    model_path = config_data.get("model_path")
+    model_dir = config_data.get("model_dir")
+    legacy_models = config_data.get("models")
+
+    def _load_joblib(path: Path):
+        import joblib  # type: ignore
+
+        return joblib.load(path)
+
+    model_local_path: Optional[Path] = None
+    if model_id:
+        model_local_path = load_input_model(str(model_id))
+        if not model_local_path:
+            raise ValueError(f"Failed to load ClearML model_id={model_id}")
+    elif model_path:
+        model_local_path = Path(str(model_path))
+        if not model_local_path.exists():
+            raise ValueError(f"model_path does not exist: {model_local_path}")
+    else:
+        enabled_specs: List[Dict[str, Any]] = []
+        if isinstance(legacy_models, list):
+            for item in legacy_models:
+                if not isinstance(item, dict):
+                    continue
+                enabled = item.get("enable", item.get("enabled", True))
+                enabled_bool = enabled.strip().lower() not in {"false", "0", "no", "off"} if isinstance(enabled, str) else bool(enabled)
+                if enabled_bool:
+                    enabled_specs.append(item)
+        if len(enabled_specs) != 1:
+            raise ValueError("Provide inference.model_id (recommended) or enable exactly one entry in models[]")
+        spec = enabled_specs[0]
+        spec_id = spec.get("model_id")
+        if spec_id:
+            model_id = str(spec_id)
+            model_local_path = load_input_model(model_id)
+            if not model_local_path:
+                raise ValueError(f"Failed to load ClearML model_id={model_id}")
+        else:
+            if not model_dir:
+                raise ValueError("model_dir is required when loading an enabled models[] entry without model_id")
+            selected_name = str(spec.get("name") or "").strip()
+            if not selected_name:
+                raise ValueError("models[].name is required when loading from model_dir")
+            loaded = load_models(str(model_dir), selected_names=[selected_name])
+            if not loaded:
+                raise ValueError(f"Failed to load model '{selected_name}' from model_dir={model_dir}")
+            # Take the first match (filtered)
+            first_key = next(iter(loaded.keys()))
+            pipeline = loaded[first_key]
+            model_label = model_name or selected_name
+            model_meta = {
+                "model_source": "local_dir",
+                "model_dir": str(model_dir),
+                "model_name": model_label,
+            }
+            return _run_single_inference(
+                mode=mode,
+                pipeline=pipeline,
+                model_label=model_label,
+                model_id=None,
+                model_meta=model_meta,
+                run_id=run_id,
+                dataset_key=dataset_key,
+                input_conf=input_conf,
+                search_conf=config_data.get("search") if isinstance(config_data.get("search"), dict) else {},
+                output_dir=output_dir,
+                full_config=config_data,
+            )
+
+    pipeline = _load_joblib(Path(model_local_path))
+    model_label = str(model_name or "model").strip() or "model"
+    model_meta: Dict[str, Any] = {
+        "model_source": ("clearml_model" if model_id else "local_path"),
+        "model_id": str(model_id or ""),
+        "model_path": str(model_local_path),
+        "model_name": model_label,
+        "pipeline_class": f"{type(pipeline).__module__}.{type(pipeline).__name__}",
+        "required_feature_names": _get_required_feature_names(pipeline) or [],
+    }
+
+    return _run_single_inference(
+        mode=mode,
+        pipeline=pipeline,
+        model_label=model_label,
+        model_id=str(model_id) if model_id else None,
+        model_meta=model_meta,
+        run_id=run_id,
+        dataset_key=dataset_key,
+        input_conf=input_conf,
+        search_conf=config_data.get("search") if isinstance(config_data.get("search"), dict) else {},
+        output_dir=output_dir,
+        full_config=config_data,
+    )
+
+
+def run_inference_core(config_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Run inference without any ClearML Task side-effects.
+
+    Intended to be called from `automl_lib.workflow.inference.*` which owns ClearML logging.
+    Returns a dict that may contain non-JSON-serialisable objects (e.g., Path, DataFrame).
+    """
+
+    return _run_from_config(config_data)
+
+
+def _run_single_inference(
+    *,
+    mode: str,
+    pipeline: Any,
+    model_label: str,
+    model_id: Optional[str],
+    model_meta: Dict[str, Any],
+    run_id: str,
+    dataset_key: str,
+    input_conf: Dict[str, Any],
+    search_conf: Dict[str, Any],
+    output_dir: Path,
+    full_config: Dict[str, Any],
+) -> Dict[str, Any]:
+    def _write_json(path: Path, payload: Any) -> None:
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _resolve_single_input() -> tuple[Dict[str, Any], Optional[str]]:
+        if input_conf.get("single") is not None:
+            if not isinstance(input_conf["single"], dict):
+                raise ValueError("input.single must be a JSON object")
+            return dict(input_conf["single"]), "config:inline"
+        json_path = input_conf.get("single_json")
+        if json_path:
+            p = Path(str(json_path))
+            raw = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(raw, list):
+                if not raw or not isinstance(raw[0], dict):
+                    raise ValueError("input.single_json must contain an object or a non-empty list of objects")
+                return dict(raw[0]), str(p)
+            if isinstance(raw, dict):
+                return dict(raw), str(p)
+            raise ValueError("input.single_json must contain an object or a list of objects")
+        raise ValueError("single mode requires input.single or input.single_json")
+
+    def _find_inference_input_csv(local_copy: Path) -> Optional[Path]:
+        processed_names = {"data_processed.csv", "preprocessed_features.csv"}
+        try:
+            candidates = [p for p in Path(local_copy).rglob("*.csv") if p.name not in processed_names]
+            if candidates:
+                candidates.sort(key=lambda p: (len(p.parts), str(p)))
+                return candidates[0]
+        except Exception:
+            pass
+        return find_first_csv(Path(local_copy))
+
+    def _resolve_batch_input() -> tuple[pd.DataFrame, str]:
         csv_path = input_conf.get("csv_path")
-        if not csv_path and input_conf.get("dataset_id"):
-            dataset_id = str(input_conf["dataset_id"])
-            local_copy = ensure_local_dataset_copy(dataset_id, Path(output_dir) / "clearml_dataset")
-            candidate_csv = find_first_csv(local_copy) if local_copy else None
-            if candidate_csv:
-                csv_path = str(candidate_csv)
-        if not csv_path:
-            raise ValueError("'csv_path' must be provided for CSV input mode")
-        df_input = pd.read_csv(csv_path)
-        if df_input.empty:
-            raise ValueError("Input CSV contains no data")
-        if clearml_mgr:
-            clearml_mgr.log_dataset_overview(df_input, "inference_input", source=csv_path)
-        print(f"Running predictions on CSV input '{csv_path}' for {len(models)} model(s)...")
-        child_mgr = _create_child_task(clearml_cfg, parent_task_id, "inference-single")
-        aggregated, per_model_results = run_grid_search(models, df_input.to_dict(orient="records"))
-        prefix = "csv"
-    elif mode_lower == "params":
+        if csv_path:
+            p = Path(str(csv_path))
+            df = pd.read_csv(p)
+            return df, str(p)
+        dataset_id = input_conf.get("dataset_id")
+        if dataset_id:
+            dsid = str(dataset_id)
+            local_copy = ensure_local_dataset_copy(dsid, output_dir / "clearml_dataset")
+            if not local_copy:
+                raise ValueError(f"Failed to download ClearML dataset_id={dsid}")
+            csv = _find_inference_input_csv(local_copy)
+            # If only the processed table is present, try the parent dataset (raw) from manifest.json.
+            try:
+                if csv and csv.name in {"data_processed.csv", "preprocessed_features.csv"}:
+                    manifest_path = Path(local_copy) / "manifest.json"
+                    if manifest_path.exists():
+                        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                        parent_id = manifest.get("parent_dataset_id") if isinstance(manifest, dict) else None
+                        if parent_id:
+                            parent_copy = ensure_local_dataset_copy(
+                                str(parent_id), output_dir / "clearml_dataset_parent"
+                            )
+                            if parent_copy:
+                                csv_parent = _find_inference_input_csv(parent_copy)
+                                if csv_parent:
+                                    csv = csv_parent
+            except Exception:
+                pass
+            if not csv:
+                raise ValueError(f"No CSV found for dataset_id={dsid}")
+            df = pd.read_csv(csv)
+            return df, str(csv)
+        raise ValueError("batch mode requires input.csv_path or input.dataset_id")
+
+    artifacts: List[Path] = []
+    # Always persist a reproducible config snapshot.
+    cfg_path = output_dir / "inference_config.json"
+    try:
+        _write_json(cfg_path, full_config)
+        artifacts.append(cfg_path)
+    except Exception:
+        pass
+
+    # ------------------------------------------------------------------
+    # Execute inference
+    # ------------------------------------------------------------------
+    t0 = time.perf_counter()
+    user_props: Dict[str, Any] = {
+        "run_id": str(run_id),
+        "dataset_key": str(dataset_key),
+        "mode": mode,
+        "model_id": model_id or "",
+        "model_name": model_label,
+    }
+    prediction_value: Optional[float] = None
+    preview_df: Optional[pd.DataFrame] = None
+    trials_preview_df: Optional[pd.DataFrame] = None
+
+    if mode == "single":
+        row, src = _resolve_single_input()
+        df = pd.DataFrame([row])
+        pred_arr = _predict_with_model(pipeline, df)
+        pred = pred_arr[0] if len(pred_arr) else None
+        payload_in = {"source": src or "", "row": row}
+        prediction_value = float(pred) if pred is not None else None
+        payload_out = {"prediction": prediction_value}
+        in_path = output_dir / "input.json"
+        out_path = output_dir / "output.json"
+        _write_json(in_path, payload_in)
+        _write_json(out_path, payload_out)
+        artifacts.extend([in_path, out_path])
+        user_props["prediction"] = payload_out["prediction"]
+    elif mode == "batch":
+        df_in, src = _resolve_batch_input()
+        if df_in.empty:
+            raise ValueError("Batch input contains no rows")
+        preds = _predict_with_model(pipeline, df_in)
+        df_out = df_in.copy()
+        df_out["prediction"] = preds
+        out_csv = output_dir / "predictions.csv"
+        df_out.to_csv(out_csv, index=False)
+        artifacts.append(out_csv)
+        user_props["n_rows"] = int(len(df_out))
+        try:
+            s = pd.to_numeric(df_out["prediction"], errors="coerce")
+            user_props["prediction_min"] = float(s.min()) if s.notna().any() else ""
+            user_props["prediction_max"] = float(s.max()) if s.notna().any() else ""
+        except Exception:
+            pass
+        try:
+            preview_df = df_out.head(50)
+        except Exception:
+            preview_df = None
+        try:
+            in_meta = {"source": src, "n_rows": int(len(df_in)), "columns": list(df_in.columns)}
+            in_meta_path = output_dir / "input_meta.json"
+            _write_json(in_meta_path, in_meta)
+            artifacts.append(in_meta_path)
+        except Exception:
+            pass
+    elif mode == "optimize":
         vars_spec = None
         if input_conf.get("variables"):
             vars_spec = parse_variables_from_config(input_conf["variables"])
         elif input_conf.get("params_path"):
             vars_spec = parse_param_spec(input_conf["params_path"])
         else:
-            raise ValueError("For 'params' mode, specify either 'variables' list or 'params_path'")
-        search_conf = config_data.get("search", {})
-        method = str(search_conf.get("method", "grid")).lower()
+            raise ValueError("Optimize mode requires input.variables or input.params_path")
+        method = str(search_conf.get("method", "grid")).strip().lower()
         n_trials = int(search_conf.get("n_trials", 20))
-        goal = str(search_conf.get("goal", "max")).lower()
-        goal_for_plot = goal
+        goal = str(search_conf.get("goal", "max")).strip().lower()
+        models = {model_label: pipeline}
         if method == "grid":
             combos = enumerate_parameter_combinations(vars_spec)
-            print(f"Performing grid search over {len(combos)} parameter combinations for {len(models)} model(s)...")
-            child_mgr = _create_child_task(clearml_cfg, parent_task_id, "inference-grid")
-            aggregated, per_model_results = run_grid_search(models, combos)
-            prefix = "grid"
+            aggregated, per_model = run_grid_search(models, combos)
         else:
-            print(
-                f"Performing Optuna '{method}' optimization with {n_trials} trial(s) for {len(models)} model(s)..."
-            )
-            child_mgr = _create_child_task(clearml_cfg, parent_task_id, f"inference-{method}")
-            aggregated, per_model_results = run_optimization(
-                models=models,
-                vars_list=vars_spec,
-                method=method,
-                n_trials=n_trials,
-                goal=goal,
-            )
-            prefix = method
-    else:
-        raise ValueError("Unknown input mode: choose 'csv' or 'params'")
-
-    _finalize_run(models, aggregated, per_model_results, output_dir, prefix, goal_for_plot, clearml_mgr=clearml_mgr)
-    if child_mgr:
-        _finalize_run(models, aggregated, per_model_results, output_dir, prefix, goal_for_plot, clearml_mgr=child_mgr)
-        child_mgr.close()
-    if clearml_mgr:
-        clearml_mgr.close()
-
-    artifacts: List[str] = []
-    output_path = Path(output_dir)
-    candidates: List[Path] = [
-        output_path / f"{prefix}_aggregated.csv",
-        output_path / f"{prefix}_correlation_matrix.csv",
-        output_path / f"{prefix}_agreement_matrix.csv",
-        output_path / f"{prefix}_mean_correlation.csv",
-        output_path / f"{prefix}_mean_agreement.csv",
-        output_path / "predictions_plot.png",
-        output_path / "correlation_heatmap.png",
-        output_path / "agreement_heatmap.png",
-    ]
-    for model_label in per_model_results.keys():
-        model_safe = str(model_label).replace(" ", "_")
-        candidates.append(output_path / f"{prefix}_{model_safe}.csv")
-    for cand in candidates:
+            aggregated, per_model = run_optimization(models=models, vars_list=vars_spec, method=method, n_trials=n_trials, goal=goal)
+        # Single-model output
+        df_trials = None
         try:
-            if cand.exists():
-                artifacts.append(str(cand))
+            df_trials = per_model.get(model_label) if isinstance(per_model, dict) else None
+            if df_trials is None and isinstance(per_model, dict) and per_model:
+                df_trials = per_model[next(iter(per_model.keys()))]
         except Exception:
-            continue
+            df_trials = None
+        if df_trials is None or not isinstance(df_trials, pd.DataFrame):
+            raise RuntimeError("Failed to generate optimization trials")
+        trials_path = output_dir / "trials.csv"
+        df_trials.to_csv(trials_path, index=False)
+        artifacts.append(trials_path)
+        try:
+            trials_preview_df = df_trials.head(50)
+        except Exception:
+            trials_preview_df = None
+        best_payload: Dict[str, Any] = {
+            "goal": goal,
+            "method": method,
+            "n_trials": n_trials,
+            "best_prediction": None,
+            "best_input": {},
+        }
+        try:
+            if "prediction" in df_trials.columns and not df_trials.empty:
+                s = pd.to_numeric(df_trials["prediction"], errors="coerce")
+                if s.notna().any():
+                    idx = int(s.idxmin()) if goal == "min" else int(s.idxmax())
+                    row = df_trials.loc[idx].to_dict()
+                    best_payload["best_prediction"] = float(pd.to_numeric(row.get("prediction"), errors="coerce"))
+                    best_payload["best_input"] = {k: v for k, v in row.items() if k not in {"prediction", "trial_index"}}
+                    user_props["best_prediction"] = best_payload["best_prediction"]
+        except Exception:
+            pass
+        best_path = output_dir / "best_solution.json"
+        _write_json(best_path, best_payload)
+        artifacts.append(best_path)
+    else:
+        raise ValueError(f"Unsupported mode: {mode}")
 
-    child_ids: List[str] = []
-    try:
-        if child_mgr and getattr(child_mgr, "task", None) is not None:
-            child_ids.append(str(child_mgr.task.id))
-    except Exception:
-        pass
-
-    task_id = None
-    try:
-        if clearml_mgr and getattr(clearml_mgr, "task", None) is not None:
-            task_id = str(clearml_mgr.task.id)
-    except Exception:
-        task_id = None
-
+    user_props["total_seconds"] = float(time.perf_counter() - t0)
     return {
-        "task_id": task_id,
-        "child_task_ids": child_ids,
-        "output_dir": str(output_dir),
-        "artifacts": artifacts,
-        "mode": str(mode_lower),
+        "mode": str(mode),
+        "output_dir": output_dir,
+        "artifacts": [p for p in artifacts if p.exists()],
+        "user_props": user_props,
+        "model_meta": model_meta,
+        "prediction": prediction_value,
+        "preview_df": preview_df,
+        "trials_preview_df": trials_preview_df,
+        "model_id": model_id,
+        "model_name": model_label,
     }
 
 
@@ -499,7 +605,7 @@ def _run_from_cli(args: argparse.Namespace) -> None:
             )
             prefix = args.search_method
 
-    _finalize_run(models, aggregated, per_model_results, args.output_dir, prefix, goal_for_plot, clearml_mgr=None)
+    _finalize_run(models, aggregated, per_model_results, args.output_dir, prefix, goal_for_plot)
 
 
 def main() -> None:
@@ -561,9 +667,12 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    config_data = _load_config(args.config)
-    if config_data is not None:
-        _run_from_config(config_data)
+    config_path = _resolve_config_path(args.config)
+    if config_path is not None:
+        # Prefer the workflow entrypoint so ClearML logging stays centralized under workflow/.
+        from automl_lib.workflow.inference.processing import run_inference_processing
+
+        run_inference_processing(Path(config_path))
     else:
         _run_from_cli(args)
 
@@ -578,7 +687,6 @@ if __name__ == "__main__":
 def run_inference_from_config(config_path: Path) -> None:
     """Run inference using a YAML config (used by pipeline phases)."""
 
-    config_data = _load_config(str(config_path))
-    if config_data is None:
-        raise FileNotFoundError(f"Inference config not found: {config_path}")
-    _run_from_config(config_data)
+    from automl_lib.workflow.inference.processing import run_inference_processing
+
+    run_inference_processing(Path(config_path))

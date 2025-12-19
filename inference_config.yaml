@@ -1,83 +1,36 @@
-# モデル保存ディレクトリ
-model_dir: "outputs/train/models"
-
-# 使用するモデル一覧（enable: true のみを使用）
-# name は保存済みジョブリブファイルのプレフィックスと一致させてください。
-models:
-  - name: LinearRegression
-    enable: true
-  - name: Ridge
-    enable: true
-  - name: Lasso
-    enable: true
-  - name: ElasticNet
-    enable: true
-  - name: SVR
-    enable: true
-  - name: KNeighbors
-    enable: true
-  - name: RandomForest
-    enable: true
-  - name: ExtraTrees
-    enable: true
-  - name: GradientBoosting
-    enable: true
-  - name: LightGBM
-    enable: true
-  - name: XGBoost
-    enable: true
-  - name: CatBoost
-    enable: true
-  - name: GaussianProcess
-    enable: true
-  - name: MLP
-    enable: true
-  - name: TabNet
-    enable: true
-  - name: TabPFN
-    enable: true
-  - name: StackingRandomForest___XGBoost___LightGBM
-    enable: true
-  - name: VotingRandomForest___XGBoost___LightGBM
-    enable: true
+# 推論は「学習で選んだ model_id」を指定して実行します。
+# - training-summary の USER PROPERTIES: recommended_model_id をコピペ
+model_id: "60beb5a6d61144bcbf6b516165becb14"
+model_name: "Random_forest"   # 任意（ClearML上の表示用ラベル）
 
 # ClearML integration for inference (optional)
 clearml:
   enabled: true
   project_name: "AutoML-with-ClearML"
-  task_name: "inference-grid"
+  task_name: null
   base_output_uri: null
-  run_locally: true         # false to submit to an agent queue
-  queue: null               # set to your agent/queue if使う場合
+  run_locally: true
+  queue: null
   tags: ["automl", "inference"]
 
 # 入力設定
 input:
-  mode: "params"        # "csv" なら csv_path を指定、"params" なら variables か params_path を指定
-  variables:
-    - name: age
-      type: int
-      method: range
-      min: 25
-      max: 40
-      step: 1
-    - name: income
-      type: float
-      method: range
-      min: 40000
-      max: 80000
-      step: 1000
-    - name: education
-      type: categorical
-      method: values
-      values: ["Bachelor", "Master"]
-  # csv_path: "data/example.csv"  # mode: csv の場合はこちらを記述
+  mode: "single"        # single | batch | optimize
+  single:
+    age: 30
+    income: 50000
+    education: "Bachelor"
+  # batch の例:
+  # csv_path: "data/example.csv"
+  # dataset_id: "CLEARML_DATASET_ID"
+  # optimize の例:
+  # params_path: "optimize_params.json"
 
-# 探索設定
+# 探索設定（mode=optimize のときのみ使用）
 search:
-  method: "tpe"        # "grid", "random", "tpe", "cmaes" から選択
-  n_trials: 100         # random/tpe/cmaes の試行数
-  goal: "min"           # "max" または "min"（目的変数の最大化または最小化）
+  method: "tpe"        # grid | random | tpe | cmaes
+  n_trials: 50
+  goal: "min"          # max | min
 
 # 出力設定
 output_dir: "outputs/inference"

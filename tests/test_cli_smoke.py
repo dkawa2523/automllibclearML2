@@ -127,50 +127,6 @@ class TestCLISmoke(unittest.TestCase):
             written = json.loads(out_path.read_text(encoding="utf-8"))
             self.assertEqual(written, expected_result)
 
-    def test_run_comparison_cli_supports_multiple_training_info(self) -> None:
-        from automl_lib.cli import run_comparison as cli
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            cfg_path = tmp / "config_comparison.yaml"
-            self._write_yaml(cfg_path, {"output": {"output_dir": str(tmp / "out")}})
-
-            t1 = tmp / "run1.json"
-            t2 = tmp / "run2.json"
-            t1.write_text(json.dumps({"training_task_ids": ["a"]}), encoding="utf-8")
-            t2.write_text(json.dumps({"training_task_ids": ["b"]}), encoding="utf-8")
-            out_path = tmp / "comparison_info.json"
-
-            expected_result = {"task_id": "cmp", "artifacts": []}
-            with mock.patch.object(cli, "run_comparison", return_value=expected_result) as mocked:
-                argv = [
-                    "prog",
-                    "--config",
-                    str(cfg_path),
-                    "--training-info",
-                    str(t1),
-                    "--training-info",
-                    str(t2),
-                    "--parent-task-id",
-                    "p1",
-                    "--output-info",
-                    str(out_path),
-                ]
-                with mock.patch.object(sys, "argv", argv), redirect_stdout(io.StringIO()):
-                    cli.main()
-
-                mocked.assert_called_once()
-                _, kwargs = mocked.call_args
-                infos = kwargs["training_info"]
-                self.assertIsInstance(infos, list)
-                self.assertEqual(len(infos), 2)
-                self.assertEqual(infos[0]["run_label"], "run1")
-                self.assertEqual(infos[1]["run_label"], "run2")
-                self.assertEqual(kwargs["parent_task_id"], ["p1"])
-
-            written = json.loads(out_path.read_text(encoding="utf-8"))
-            self.assertEqual(written, expected_result)
-
     def test_run_inference_cli_writes_output_info(self) -> None:
         from automl_lib.cli import run_inference as cli
 
@@ -205,22 +161,20 @@ class TestCLISmoke(unittest.TestCase):
             self._write_yaml(cfg_train, {"data": {"dataset_id": "dummy"}, "models": [{"name": "ridge"}]})
             out_path = tmp / "pipeline_info.json"
 
-            expected = {"mode": "in_process"}
+            expected = {"mode": "clearml_pipeline"}
             with mock.patch.object(cli, "run_pipeline", return_value=expected) as mocked:
                 argv = [
                     "prog",
                     "--config",
                     str(cfg_train),
                     "--mode",
-                    "in_process",
+                    "clearml",
                     "--datareg-config",
                     str(tmp / "config_dataregit.yaml"),
                     "--editing-config",
                     str(tmp / "config_editing.yaml"),
                     "--preproc-config",
                     str(tmp / "config_preprocessing.yaml"),
-                    "--comparison-config",
-                    str(tmp / "config_comparison.yaml"),
                     "--output-info",
                     str(out_path),
                 ]
@@ -229,12 +183,10 @@ class TestCLISmoke(unittest.TestCase):
 
                 mocked.assert_called_once()
                 _, kwargs = mocked.call_args
-                self.assertEqual(kwargs["mode"], "in_process")
+                self.assertEqual(kwargs["mode"], "clearml")
                 self.assertTrue(str(kwargs["data_registration_config"]).endswith("config_dataregit.yaml"))
                 self.assertTrue(str(kwargs["data_editing_config"]).endswith("config_editing.yaml"))
                 self.assertTrue(str(kwargs["preprocessing_config"]).endswith("config_preprocessing.yaml"))
-                self.assertTrue(str(kwargs["comparison_config"]).endswith("config_comparison.yaml"))
 
             written = json.loads(out_path.read_text(encoding="utf-8"))
             self.assertEqual(written, expected)
-

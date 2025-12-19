@@ -29,7 +29,6 @@ class ClearMLAgentsConfig(_StrictBaseModel):
     inference: Optional[str] = None
     optimization: Optional[str] = None
     pipeline: Optional[str] = None
-    comparison: Optional[str] = None
 
 
 class RunSettings(_StrictBaseModel):
@@ -43,6 +42,7 @@ class ClearMLNamingConfig(_StrictBaseModel):
     # "user_dataset": use "<project>/<user>/<dataset_key>"
     project_mode: Literal["root", "user_dataset"] = "root"
     train_models_suffix: str = "train_models"
+    prediction_runs_suffix: str = "Prediction_runs"
 
 
 class ClearMLSettings(_StrictBaseModel):
@@ -60,13 +60,12 @@ class ClearMLSettings(_StrictBaseModel):
     # What to show on the training-summary task under "Plots"
     # - none: do not mirror per-model plots to summary
     # - best: show only recommended model plots (default)
-    # - all: show plots for all model tasks (can get noisy)
+    # - all: deprecated (treated as "best" to keep the summary clean)
     summary_plots: Literal["none", "best", "all"] = "best"
     # How to choose the "recommended model" for the training-summary dashboard:
-    # - auto: use comparison ranking when embedded, else training primary metric
+    # - auto: same as "training" (kept for backward compatibility)
     # - training: always use training primary metric (evaluation.primary_metric)
-    # - comparison: always use comparison ranking (ranking.primary_metric, incl. composite_score)
-    recommendation_mode: Literal["auto", "training", "comparison"] = "auto"
+    recommendation_mode: Literal["auto", "training"] = "auto"
     # Clone execution mode (Phase 3). When "clone", callers may clone template_task_id instead of creating a new task.
     execution_mode: Literal["new", "clone"] = "new"
     template_task_id: Optional[str] = None
@@ -82,47 +81,8 @@ class ClearMLSettings(_StrictBaseModel):
     enable_inference: bool = False
     enable_optimization: bool = False
     enable_pipeline: bool = False
-    # Comparison execution mode:
-    # - disabled: do not run comparison (or embed it)
-    # - standalone: run a separate comparison task/step
-    # - embedded: report comparison-style aggregations into training-summary and skip standalone comparison
-    comparison_mode: Literal["disabled", "standalone", "embedded"] = "disabled"
-    # Legacy flags (kept for backward compatibility; normalized by validator below).
-    enable_comparison: bool = False
-    embed_comparison_in_training_summary: bool = False
-
-    comparison_agent: Optional[str] = None
-    comparison_metrics: List[str] = Field(default_factory=list)
-    comparison_task_name: Optional[str] = None
 
     agents: ClearMLAgentsConfig = Field(default_factory=ClearMLAgentsConfig)
-
-    @model_validator(mode="after")
-    def _normalize_comparison_mode(self) -> "ClearMLSettings":
-        # If user explicitly set comparison_mode, it takes precedence.
-        fields_set = getattr(self, "model_fields_set", set())
-        if "comparison_mode" not in fields_set:
-            if self.enable_comparison:
-                self.comparison_mode = "embedded" if self.embed_comparison_in_training_summary else "standalone"
-            else:
-                self.comparison_mode = "disabled"
-
-        mode = str(self.comparison_mode or "disabled").strip().lower()
-        if mode not in {"disabled", "standalone", "embedded"}:
-            raise ValueError("clearml.comparison_mode must be one of: disabled, standalone, embedded")
-
-        if mode == "disabled":
-            self.enable_comparison = False
-            self.embed_comparison_in_training_summary = False
-        elif mode == "standalone":
-            self.enable_comparison = True
-            self.embed_comparison_in_training_summary = False
-        else:  # embedded
-            self.enable_comparison = True
-            self.embed_comparison_in_training_summary = True
-
-        self.comparison_mode = mode  # normalize casing
-        return self
 
 
 class DataSettings(_StrictBaseModel):
@@ -339,93 +299,6 @@ class OutputSettings(_StrictBaseModel):
 
 class PreprocessingOutputSettings(_StrictBaseModel):
     output_dir: str = "outputs/preprocessing"
-
-
-class ComparisonOutputSettings(_StrictBaseModel):
-    output_dir: str = "outputs/comparison"
-
-
-class ComparisonCompositeScoreConfig(_StrictBaseModel):
-    enabled: bool = True
-    metrics: List[str] = Field(default_factory=list)
-    weights: Dict[str, float] = Field(default_factory=dict)
-    require_all_metrics: bool = False
-
-    @field_validator("metrics", mode="before")
-    @classmethod
-    def _normalize_metrics(cls, value: Any) -> List[str]:
-        if value is None:
-            return []
-        items = value if isinstance(value, list) else [value]
-        normalized: List[str] = []
-        for item in items:
-            cand = _normalize_none_like(item)
-            if not cand:
-                continue
-            normalized.append(str(cand).strip().lower())
-        return normalized
-
-    @field_validator("weights", mode="before")
-    @classmethod
-    def _normalize_weights(cls, value: Any) -> Dict[str, float]:
-        if value is None:
-            return {}
-        if not isinstance(value, dict):
-            raise ValueError("ranking.composite.weights must be a mapping")
-        normalized: Dict[str, float] = {}
-        for k, v in value.items():
-            key = _normalize_none_like(k)
-            if not key:
-                continue
-            try:
-                weight = float(v)
-            except Exception as exc:
-                raise ValueError(f"ranking.composite.weights[{k!r}] must be a number") from exc
-            if weight < 0:
-                raise ValueError(f"ranking.composite.weights[{k!r}] must be >= 0")
-            if weight == 0:
-                continue
-            normalized[str(key).strip().lower()] = weight
-        return normalized
-
-
-class ComparisonRankingSettings(_StrictBaseModel):
-    metrics: List[str] = Field(default_factory=list)
-    primary_metric: Optional[str] = None
-    goal: Optional[Literal["min", "max"]] = None
-    top_k: Optional[int] = None
-    composite: ComparisonCompositeScoreConfig = Field(default_factory=ComparisonCompositeScoreConfig)
-
-    @field_validator("metrics", mode="before")
-    @classmethod
-    def _normalize_metrics(cls, value: Any) -> List[str]:
-        if value is None:
-            return []
-        items = value if isinstance(value, list) else [value]
-        normalized: List[str] = []
-        for item in items:
-            cand = _normalize_none_like(item)
-            if not cand:
-                continue
-            normalized.append(str(cand).strip().lower())
-        return normalized
-
-    @field_validator("primary_metric")
-    @classmethod
-    def _normalize_primary_metric(cls, value: Optional[str]) -> Optional[str]:
-        cand = _normalize_none_like(value)
-        if not cand:
-            return None
-        return str(cand).strip().lower()
-
-    @field_validator("top_k")
-    @classmethod
-    def _validate_top_k(cls, value: Optional[int]) -> Optional[int]:
-        if value is None:
-            return None
-        if value < 1:
-            raise ValueError("ranking.top_k must be >= 1 (or null)")
-        return value
 
 
 def _validate_preprocessing_registry(settings: PreprocessSettings) -> None:
@@ -652,13 +525,6 @@ class PreprocessingConfig(_StrictBaseModel):
         return self
 
 
-class ComparisonConfig(_StrictBaseModel):
-    run: RunSettings = Field(default_factory=RunSettings)
-    output: ComparisonOutputSettings = Field(default_factory=ComparisonOutputSettings)
-    clearml: Optional[ClearMLSettings] = None
-    ranking: ComparisonRankingSettings = Field(default_factory=ComparisonRankingSettings)
-
-
 class InferenceModelSpec(_StrictBaseModel):
     name: str
     enable: bool = True
@@ -677,19 +543,42 @@ class InferenceVariableSpec(_StrictBaseModel):
 
 
 class InferenceInputConfig(_StrictBaseModel):
-    mode: Literal["csv", "params"] = "csv"
+    # Backward compatible:
+    # - legacy: "csv" -> "batch", "params" -> "optimize"
+    mode: Literal["single", "batch", "optimize"] = "single"
+    # single
+    single: Optional[Dict[str, Any]] = None
+    single_json: Optional[str] = None
+    # batch
+    dataset_id: Optional[str] = None
     variables: Optional[List[InferenceVariableSpec]] = None
     params_path: Optional[str] = None
     csv_path: Optional[str] = None
 
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _normalize_mode(cls, value: Any) -> Any:
+        if value is None:
+            return value
+        mode = str(value).strip().lower()
+        if mode == "csv":
+            return "batch"
+        if mode == "params":
+            return "optimize"
+        return mode
+
     @model_validator(mode="after")
     def _validate_input(self) -> "InferenceInputConfig":
-        if self.mode == "csv":
-            if not self.csv_path:
-                raise ValueError("input.csv_path is required when input.mode=csv")
-        if self.mode == "params":
+        mode = str(self.mode).strip().lower()
+        if mode == "single":
+            if not self.single and not self.single_json:
+                raise ValueError("input.single or input.single_json is required when input.mode=single")
+        if mode == "batch":
+            if not self.csv_path and not self.dataset_id:
+                raise ValueError("input.csv_path or input.dataset_id is required when input.mode=batch")
+        if mode == "optimize":
             if not self.variables and not self.params_path:
-                raise ValueError("input.variables or input.params_path is required when input.mode=params")
+                raise ValueError("input.variables or input.params_path is required when input.mode=optimize")
         return self
 
 
@@ -697,6 +586,9 @@ class InferenceSearchConfig(_StrictBaseModel):
     method: Literal["grid", "random", "tpe", "cmaes"] = "grid"
     n_trials: int = 20
     goal: Literal["max", "min"] = "max"
+    # How many top predictions to surface on inference-summary (optimize only).
+    # Child tasks are created for ALL trials; `top_k` only controls the TopK table and tagging.
+    top_k: int = 10
 
     @field_validator("n_trials")
     @classmethod
@@ -705,10 +597,23 @@ class InferenceSearchConfig(_StrictBaseModel):
             raise ValueError("search.n_trials must be >= 1")
         return value
 
+    @field_validator("top_k")
+    @classmethod
+    def _check_top_k(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("search.top_k must be >= 1")
+        return value
+
 
 class InferenceConfig(_StrictBaseModel):
     run: RunSettings = Field(default_factory=RunSettings)
-    model_dir: str
+    # Prefer a single model_id for inference (recommended_model_id from training-summary).
+    model_id: Optional[str] = None
+    model_name: Optional[str] = None
+    # Optional local fallback (joblib)
+    model_path: Optional[str] = None
+    model_dir: Optional[str] = None
+    # Legacy multi-model config (kept for backward compatibility but inference execution expects a single enabled model).
     models: List[InferenceModelSpec] = Field(default_factory=list)
     clearml: Optional[ClearMLSettings] = None
     input: InferenceInputConfig
@@ -717,10 +622,18 @@ class InferenceConfig(_StrictBaseModel):
 
     @model_validator(mode="after")
     def _validate_inference(self) -> "InferenceConfig":
-        if not self.models:
-            raise ValueError("models must be a non-empty list")
-        if not any(m.enable for m in self.models):
-            raise ValueError("At least one models[].enable must be true")
+        if self.model_id or self.model_path:
+            return self
+        enabled = [m for m in (self.models or []) if bool(getattr(m, "enable", True))]
+        if not enabled:
+            raise ValueError("Provide inference.model_id (recommended) or enable exactly one entry in models[]")
+        if len(enabled) != 1:
+            raise ValueError("Exactly one models[].enable must be true for inference")
+        spec = enabled[0]
+        if spec.model_id:
+            return self
+        if not self.model_dir:
+            raise ValueError("model_dir is required when loading an enabled models[] entry without model_id")
         return self
 
 

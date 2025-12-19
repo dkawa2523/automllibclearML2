@@ -1,0 +1,58 @@
+# Optimize inference example (config-based)
+#
+# - input.mode=optimize のとき:
+#   - 親タスク: inference-summary
+#   - 子タスク: Prediction_runs 配下に 全trial の "predict ..." タスク（単発推論と同じ入出力）
+#
+# - model_id は training-summary の USER PROPERTIES: recommended_model_id を推奨（pipeline実行時は自動で上書きされます）
+
+run:
+  id: null
+  dataset_key: null
+  user: null
+
+model_id: ""
+model_name: "best_model"  # 任意（ClearML表示用）
+
+clearml:
+  enabled: true
+  project_name: "AutoML-with-ClearML"
+  task_name: null
+  base_output_uri: null
+  queue: null
+  tags: ["automl", "inference", "optimize"]
+  run_locally: true
+  naming:
+    project_mode: "root"
+    prediction_runs_suffix: "Prediction_runs"
+
+input:
+  mode: "optimize"
+  # 変数定義（range/values/fixed）
+  variables:
+    - name: age
+      type: int
+      method: range
+      min: 18
+      max: 70
+      step: 1
+
+    - name: income
+      type: float
+      method: range
+      min: 20000
+      max: 200000
+      step: 1000
+
+    - name: education
+      type: categorical
+      method: values
+      values: ["HighSchool", "Bachelor", "Master", "PhD"]
+
+search:
+  method: "tpe"     # grid | random | tpe | cmaes
+  n_trials: 50
+  goal: "min"       # max | min
+  top_k: 10         # inference-summary のTopK表示（子タスクは全trial）
+
+output_dir: "outputs/inference"

@@ -12,7 +12,7 @@ class TestPhaseProcessingSmoke(unittest.TestCase):
         path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
 
     def test_preprocessing_processing_passthrough_without_clearml(self) -> None:
-        from automl_lib.phases.preprocessing import processing as mod
+        from automl_lib.workflow.preprocessing import processing as mod
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -29,7 +29,7 @@ class TestPhaseProcessingSmoke(unittest.TestCase):
             self.assertEqual(result["csv_path"], "data/example.csv")
 
     def test_data_registration_processing_passthrough_without_clearml(self) -> None:
-        from automl_lib.phases.data_registration import processing as mod
+        from automl_lib.workflow.data_registration import processing as mod
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -40,7 +40,7 @@ class TestPhaseProcessingSmoke(unittest.TestCase):
             self.assertEqual(result["csv_path"], "dummy.csv")
 
     def test_data_editing_processing_writes_csv_without_clearml(self) -> None:
-        from automl_lib.phases.data_editing import processing as mod
+        from automl_lib.workflow.data_editing import processing as mod
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -65,8 +65,8 @@ class TestPhaseProcessingSmoke(unittest.TestCase):
             self.assertIsNone(result["dataset_id"])
             self.assertEqual(result["csv_path"], str(csv_out))
 
-    def test_training_processing_sets_env_for_run_automl(self) -> None:
-        from automl_lib.phases.training import processing as mod
+    def test_training_processing_passes_inputs_to_run_automl(self) -> None:
+        from automl_lib.workflow.training import processing as mod
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -76,9 +76,12 @@ class TestPhaseProcessingSmoke(unittest.TestCase):
             os.environ["AUTO_ML_PARENT_TASK_ID"] = "old_parent"
             os.environ["AUTO_ML_DATASET_ID"] = "old_dataset"
 
-            def _fake_run_automl(_path):
-                self.assertEqual(os.environ.get("AUTO_ML_PARENT_TASK_ID"), "preproc_task")
-                self.assertEqual(os.environ.get("AUTO_ML_DATASET_ID"), "ds_preproc")
+            def _fake_run_automl(_path, *, dataset_id=None, parent_task_id=None):
+                self.assertEqual(dataset_id, "ds_preproc")
+                self.assertEqual(parent_task_id, "preproc_task")
+                # training processing should not mutate these env vars anymore
+                self.assertEqual(os.environ.get("AUTO_ML_PARENT_TASK_ID"), "old_parent")
+                self.assertEqual(os.environ.get("AUTO_ML_DATASET_ID"), "old_dataset")
                 self.assertEqual(os.environ.get("CLEARML_TASK_ID"), "")
                 return {
                     "summary_task_id": "sum",
@@ -95,30 +98,6 @@ class TestPhaseProcessingSmoke(unittest.TestCase):
             self.assertEqual(result["training_task_ids"], ["c1"])
             self.assertTrue(result.get("metrics"))
 
-            # restored
+            # unchanged
             self.assertEqual(os.environ.get("AUTO_ML_PARENT_TASK_ID"), "old_parent")
             self.assertEqual(os.environ.get("AUTO_ML_DATASET_ID"), "old_dataset")
-
-    def test_comparison_processing_uses_metrics_without_clearml(self) -> None:
-        from automl_lib.phases.comparison import processing as mod
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            cfg = tmp / "config_comparison.yaml"
-            out_dir = tmp / "comparison"
-            self._write_yaml(cfg, {"output": {"output_dir": str(out_dir)}})
-
-            training_info = {
-                "task_id": "sum",
-                "metrics": [
-                    {"model": "A", "rmse": 1.0},
-                    {"model": "B", "rmse": 0.8},
-                ],
-            }
-            result = mod.run_comparison_processing(cfg, training_info=training_info)
-            self.assertIsNone(result["task_id"])
-            artifacts = result.get("artifacts") or []
-            self.assertTrue(artifacts)
-            for p in artifacts:
-                self.assertTrue(Path(p).exists(), p)
-

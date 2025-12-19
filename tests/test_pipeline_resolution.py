@@ -16,26 +16,32 @@ class TestPipelineResolution(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
-            self._write_yaml(tmp / "config.yaml", {"data": {"dataset_id": "dummy"}, "models": [{"name": "ridge"}]})
-            for name in ["config_dataregit.yaml", "config_editing.yaml", "config_preprocessing.yaml", "config_comparison.yaml"]:
+            self._write_yaml(
+                tmp / "config.yaml",
+                {
+                    "data": {"dataset_id": "dummy"},
+                    "models": [{"name": "ridge"}],
+                    "clearml": {"enabled": True, "enable_pipeline": True},
+                },
+            )
+            for name in ["config_dataregit.yaml", "config_editing.yaml", "config_preprocessing.yaml"]:
                 (tmp / name).write_text("{}", encoding="utf-8")
 
             old = Path.cwd()
             try:
                 os.chdir(tmp)
-                with mock.patch.object(mod, "_run_in_process_pipeline", return_value={"mode": "in_process"}) as mocked:
-                    result = mod.run_pipeline(Path("config.yaml"), mode="in_process")
-                    self.assertEqual(result["mode"], "in_process")
+                with mock.patch.object(mod, "_run_clearml_pipeline_controller", return_value={"mode": "clearml"}) as mocked:
+                    result = mod.run_pipeline(Path("config.yaml"), mode="clearml")
+                    self.assertEqual(result["mode"], "clearml")
 
                     _, kwargs = mocked.call_args
                     self.assertEqual(Path(kwargs["data_registration_config"]).name, "config_dataregit.yaml")
                     self.assertEqual(Path(kwargs["data_editing_config"]).name, "config_editing.yaml")
                     self.assertEqual(Path(kwargs["preprocessing_config"]).name, "config_preprocessing.yaml")
-                    self.assertEqual(Path(kwargs["comparison_config"]).name, "config_comparison.yaml")
             finally:
                 os.chdir(old)
 
-    def test_run_pipeline_auto_prefers_clearml_controller(self) -> None:
+    def test_run_pipeline_rejects_non_clearml_mode(self) -> None:
         from automl_lib.pipeline import controller as mod
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -52,12 +58,9 @@ class TestPipelineResolution(unittest.TestCase):
             old = Path.cwd()
             try:
                 os.chdir(tmp)
-                with mock.patch.object(mod, "_run_clearml_pipeline_controller", return_value={"mode": "clearml"}) as mocked_clearml:
-                    with mock.patch.object(mod, "_run_in_process_pipeline", return_value={"mode": "in_process"}) as mocked_inproc:
-                        result = mod.run_pipeline(Path("config.yaml"), mode="auto")
-                        self.assertEqual(result["mode"], "clearml")
-                        mocked_clearml.assert_called_once()
-                        mocked_inproc.assert_not_called()
+                with self.assertRaises(ValueError):
+                    mod.run_pipeline(Path("config.yaml"), mode="auto")
+                with self.assertRaises(ValueError):
+                    mod.run_pipeline(Path("config.yaml"), mode="in_process")
             finally:
                 os.chdir(old)
-

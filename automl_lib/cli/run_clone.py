@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from automl_lib.clearml import clone_task
+from automl_lib.integrations.clearml import clone_task
 from automl_lib.cli.common import load_json_or_yaml, print_and_write_json
 
 
@@ -52,4 +52,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

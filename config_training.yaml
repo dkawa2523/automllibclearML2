@@ -21,23 +21,86 @@ preprocessing:
 
 models:
   - name: LinearRegression
+    enable: true
     params: {}
   - name: Ridge
+    enable: true
     params:
       alpha: [0.1, 1.0]
+  - name: Lasso
+    enable: true
+    params: {}
+  - name: ElasticNet
+    enable: true
+    params: {}
+  - name: SVR
+    enable: true
+    params: {}
+  - name: KNeighbors
+    enable: true
+    params: {}
   - name: RandomForest
+    enable: true
     params:
       n_estimators: [50]
       max_depth: [null]
+  - name: ExtraTrees
+    enable: true
+    params: {}
+  - name: GradientBoosting
+    enable: true
+    params: {}
+  - name: GaussianProcess
+    enable: true
+    params: {}
+  - name: MLP
+    enable: true
+    params: {}
+  # Classification-only models (will be skipped automatically for regression)
+  - name: LogisticRegression
+    enable: true
+    params: {}
+  - name: SVC
+    enable: true
+    params: {}
+  # Optional third-party models (requirements-optional.txt)
+  - name: LightGBM
+    enable: true
+    params: {}
+  - name: XGBoost
+    enable: true
+    params: {}
+  - name: CatBoost
+    enable: true
+    params: {}
+  - name: TabNet
+    enable: true
+    params: {}
+  - name: TabPFN
+    enable: true
+    params: {}
 
 ensembles:
   stacking:
-    enable: false
-    estimators: []
+    # Recommended: stacking tends to be the most effective "simple ensemble"
+    # for tabular problems. Optional models are skipped automatically when the
+    # corresponding library is not installed.
+    enable: true
+    estimators:
+      - LightGBM
+      - XGBoost
+      - CatBoost
+      # Always-available fallbacks (scikit-learn)
+    # Keep null to auto-pick: regression=LinearRegression / classification=LogisticRegression
     final_estimator: null
   voting:
-    enable: false
-    estimators: []
+    # Recommended: enable as a lightweight baseline ensemble.
+    enable: true
+    estimators:
+      - LightGBM
+      - XGBoost
+      - CatBoost
+    # Use hard voting for maximum compatibility (soft requires predict_proba for all).
     voting: "hard"
 
 cross_validation:
@@ -80,7 +143,6 @@ clearml:
   queue: "default"
   tags: ["automl", "training"]
   enable_training: true
-  # training 単独実行では pipeline/comparison は別CLI推奨
+  # training 単独実行（pipeline は別CLI）
   enable_pipeline: false
-  enable_comparison: false
   run_tasks_locally: true

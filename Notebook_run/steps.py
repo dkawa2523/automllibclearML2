@@ -1,0 +1,339 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+import pandas as pd
+
+from .clearml_utils import dataset_url, find_latest_task_by_prefix, task_url, task_user_properties
+from .runtime import NotebookContext
+from .ui import display_scrollable_df
+
+
+def _parse_yaml_text(text: str) -> Dict[str, Any]:
+    try:
+        import yaml  # type: ignore
+    except Exception as exc:
+        raise RuntimeError("pyyaml が必要です: pip install pyyaml") from exc
+    obj = yaml.safe_load(str(text))
+    if not isinstance(obj, dict):
+        raise ValueError("Edited YAML must be a dict")
+    return obj
+
+
+def _apply_default_if_unchanged(*, current: str, default_if_equals: str, new_default: Optional[str]) -> str:
+    cur = str(current or "").strip()
+    base = str(default_if_equals or "").strip()
+    if not new_default:
+        return cur
+    if not cur or cur == base:
+        return str(new_default).strip()
+    return cur
+
+
+def data_registration(ctx: NotebookContext, *, yaml_text: str, base_config_path: Path = Path("config_dataregit.yaml")) -> Dict[str, Any]:
+    base_cfg = ctx.load_yaml(base_config_path)
+    patch = _parse_yaml_text(yaml_text)
+    merged = ctx.deep_update(base_cfg, patch)
+    out_cfg_path = ctx.write_yaml(ctx.config_out_dir / "data_registration.yaml", merged)
+    print(f"[data_registration] config saved: {out_cfg_path}")
+
+    from automl_lib.cli.common import clearml_avoid_task_reuse
+    from automl_lib.workflow.data_registration.processing import run_data_registration_processing
+
+    clearml_avoid_task_reuse()
+    info = run_data_registration_processing(out_cfg_path) or {}
+    print("[data_registration] result:")
+    print(json.dumps(info, ensure_ascii=False, indent=2, default=str))
+
+    dataset_id = str(info.get("dataset_id") or "").strip() or None
+    task_id = str(info.get("task_id") or "").strip() or None
+    csv_path = str(info.get("csv_path") or (merged.get("data") or {}).get("csv_path") or "").strip() or None
+    run_id = str(info.get("run_id") or "").strip() or None
+
+    if csv_path and Path(csv_path).exists():
+        try:
+            df = pd.read_csv(csv_path)
+            display_scrollable_df(df, max_rows=50, max_height_px=320)
+        except Exception:
+            pass
+
+    print(f"dataset_id: {dataset_id}")
+    print(f"dataset_link: {dataset_url(dataset_id)}")
+    print(f"task_id: {task_id}")
+    print(f"task_link: {task_url(task_id)}")
+
+    ctx.update_state(
+        {
+            "data_registration": {
+                "dataset_id": dataset_id,
+                "task_id": task_id,
+                "csv_path": csv_path,
+                "run_id": run_id,
+            }
+        }
+    )
+    print(f"[data_registration] state saved: {ctx.state_path}")
+    return info
+
+
+def pipeline_training(ctx: NotebookContext, *, yaml_text: str, base_config_path: Path = Path("config.yaml")) -> Dict[str, Any]:
+    base_cfg = ctx.load_yaml(base_config_path)
+    patch = _parse_yaml_text(yaml_text)
+    merged = ctx.deep_update(base_cfg, patch)
+
+    # Default dataset_id from previous data_registration, but do not override user changes.
+    state = ctx.load_state()
+    reg_dsid = str(((state.get("data_registration") or {}).get("dataset_id") or "")).strip() or None
+    base_dsid = str(((base_cfg.get("data") or {}).get("dataset_id") or "")).strip()
+    cur_dsid = str(((merged.get("data") or {}).get("dataset_id") or "")).strip()
+    dsid = _apply_default_if_unchanged(current=cur_dsid, default_if_equals=base_dsid, new_default=reg_dsid)
+    merged.setdefault("data", {})
+    merged["data"]["dataset_id"] = dsid
+
+    # This cell is preprocessing+training only (no inference).
+    merged.setdefault("clearml", {})
+    merged["clearml"]["enable_inference"] = False
+
+    out_cfg_path = ctx.write_yaml(ctx.config_out_dir / "pipeline_training.yaml", merged)
+    print(f"[pipeline] config saved: {out_cfg_path}")
+
+    from automl_lib.cli.common import clearml_avoid_task_reuse
+    from automl_lib.pipeline.controller import run_pipeline
+
+    clearml_avoid_task_reuse()
+    pipe_info = run_pipeline(out_cfg_path, mode="clearml") or {}
+    print("[pipeline] controller result:")
+    print(json.dumps(pipe_info, ensure_ascii=False, indent=2, default=str))
+
+    run_id = str(pipe_info.get("run_id") or "").strip() or None
+    pipeline_task_id = str(pipe_info.get("pipeline_task_id") or "").strip() or None
+    print(f"pipeline_task_id: {pipeline_task_id}")
+    print(f"pipeline_link: {task_url(pipeline_task_id)}")
+
+    preproc_task = find_latest_task_by_prefix(run_id=run_id or "", prefix="preprocessing") if run_id else None
+    train_summary_task = find_latest_task_by_prefix(run_id=run_id or "", prefix="training-summary") if run_id else None
+
+    preproc_props = task_user_properties(preproc_task)
+    train_props = task_user_properties(train_summary_task)
+
+    preprocessed_dataset_id = (preproc_props.get("preprocessed_dataset_id") or "").strip() or None
+    training_dataset_id = (train_props.get("dataset_id") or "").strip() or None
+    recommended_model_id = (train_props.get("recommended_model_id") or "").strip() or None
+    recommended_model_name = (train_props.get("recommended_model_name") or "").strip() or None
+    training_summary_task_id = str(getattr(train_summary_task, "id", "") or "").strip() or None
+    preprocessing_task_id = str(getattr(preproc_task, "id", "") or "").strip() or None
+
+    print("\n--- Preprocessing ---")
+    print(f"preprocessing_task_id: {preprocessing_task_id}")
+    print(f"preprocessing_task_link: {task_url(preprocessing_task_id)}")
+    print(f"preprocessed_dataset_id: {preprocessed_dataset_id}")
+    print(f"preprocessed_dataset_link: {dataset_url(preprocessed_dataset_id)}")
+
+    print("\n--- Training Summary ---")
+    print(f"training_summary_task_id: {training_summary_task_id}")
+    print(f"training_summary_link: {task_url(training_summary_task_id)}")
+    print(f"training_dataset_id: {training_dataset_id}")
+    print(f"recommended_model_name: {recommended_model_name}")
+    print(f"recommended_model_id: {recommended_model_id}")
+
+    # Suggestion YAML for inference inputs (copy/paste friendly).
+    target = str(((merged.get("data") or {}).get("target_column") or "target")).strip()
+    suggest_single = {"input": {"mode": "single", "single": {}}}
+    suggest_opt = {"input": {"mode": "optimize", "variables": []}}
+
+    try:
+        from automl_lib.integrations.clearml import load_input_model
+        from automl_lib.inference.model_utils import _get_required_feature_names
+        import joblib  # type: ignore
+
+        if recommended_model_id:
+            local_model = load_input_model(str(recommended_model_id))
+            if local_model:
+                pipe = joblib.load(local_model)
+                req = _get_required_feature_names(pipe) or []
+                if target in req:
+                    req = [c for c in req if c != target]
+                req = list(req)[:20]
+                suggest_single["input"]["single"] = {c: "" for c in req}
+                suggest_opt["input"]["variables"] = [
+                    {"name": c, "type": "float", "method": "range", "min": 0, "max": 1, "step": 0.1}
+                    for c in req[:2]
+                ]
+    except Exception:
+        pass
+
+    print("\n--- Inference input examples (copy/paste) ---")
+    print("# suggest_single_yaml")
+    print(ctx.dump_yaml(suggest_single))
+    print("# suggest_optimize_yaml")
+    print(ctx.dump_yaml(suggest_opt))
+
+    ctx.update_state(
+        {
+            "pipeline": {
+                "run_id": run_id,
+                "pipeline_task_id": pipeline_task_id,
+                "preprocessing_task_id": preprocessing_task_id,
+                "preprocessed_dataset_id": preprocessed_dataset_id,
+                "training_summary_task_id": training_summary_task_id,
+                "recommended_model_id": recommended_model_id,
+                "recommended_model_name": recommended_model_name,
+                "suggest_single_yaml": ctx.dump_yaml(suggest_single),
+                "suggest_optimize_yaml": ctx.dump_yaml(suggest_opt),
+            }
+        }
+    )
+    print(f"[pipeline] state saved: {ctx.state_path}")
+    return pipe_info
+
+
+def inference_single(ctx: NotebookContext, *, yaml_text: str, base_config_path: Path = Path("inference_config.yaml")) -> Dict[str, Any]:
+    base_cfg = ctx.load_yaml(base_config_path)
+    patch = _parse_yaml_text(yaml_text)
+
+    # Guard: do not run if input.single is empty (avoid confusing no-op).
+    row = ((patch.get("input") or {}).get("single") or {})
+    if not isinstance(row, dict) or not row:
+        raise ValueError(
+            "input.single が空です。\n"
+            "前処理+学習セルの出力 'suggest_single_yaml' をコピペして埋めてから実行してください。"
+        )
+
+    # Default model_id from training recommended_model_id, but do not override user changes.
+    state = ctx.load_state()
+    rec_mid = str(((state.get("pipeline") or {}).get("recommended_model_id") or "")).strip() or None
+    base_mid = str(base_cfg.get("model_id") or "").strip()
+    cur_mid = str(patch.get("model_id") or "").strip()
+    patch["model_id"] = _apply_default_if_unchanged(current=cur_mid, default_if_equals=base_mid, new_default=rec_mid)
+
+    merged = ctx.deep_update(base_cfg, patch)
+    out_cfg_path = ctx.write_yaml(ctx.config_out_dir / "inference_single.yaml", merged)
+    print(f"[inference single] config saved: {out_cfg_path}")
+
+    from automl_lib.cli.common import clearml_avoid_task_reuse
+    from automl_lib.workflow import run_inference
+
+    clearml_avoid_task_reuse()
+    info = run_inference(out_cfg_path) or {}
+    print("[inference single] result:")
+    print(json.dumps(info, ensure_ascii=False, indent=2, default=str))
+
+    task_id = str(info.get("task_id") or "").strip() or None
+    output_dir = Path(str(info.get("output_dir") or "")) if info.get("output_dir") else None
+
+    row = {}
+    pred = None
+    try:
+        if output_dir and (output_dir / "input.json").exists():
+            row = json.loads((output_dir / "input.json").read_text(encoding="utf-8")).get("row") or {}
+        if output_dir and (output_dir / "output.json").exists():
+            pred = json.loads((output_dir / "output.json").read_text(encoding="utf-8")).get("prediction")
+    except Exception:
+        pass
+
+    df = pd.DataFrame([dict(row or {}, prediction=pred)])
+    display_scrollable_df(df, max_rows=1, max_height_px=240)
+    print(f"task_id: {task_id}")
+    print(f"task_link: {task_url(task_id)}")
+
+    ctx.update_state({"inference_single": {"task_id": task_id, "output_dir": str(output_dir) if output_dir else None}})
+    print(f"[inference single] state saved: {ctx.state_path}")
+    return info
+
+
+def inference_optimize(ctx: NotebookContext, *, yaml_text: str, base_config_path: Path = Path("inference_config_optimize.yaml")) -> Dict[str, Any]:
+    base_cfg = ctx.load_yaml(base_config_path)
+    patch = _parse_yaml_text(yaml_text)
+
+    vars_list = ((patch.get("input") or {}).get("variables") or [])
+    if not isinstance(vars_list, list) or len(vars_list) == 0:
+        raise ValueError(
+            "input.variables が空です。\n"
+            "前処理+学習セルの出力 'suggest_optimize_yaml' をコピペして埋めてから実行してください。"
+        )
+
+    # Default model_id from training recommended_model_id, but do not override user changes.
+    state = ctx.load_state()
+    rec_mid = str(((state.get("pipeline") or {}).get("recommended_model_id") or "")).strip() or None
+    base_mid = str(base_cfg.get("model_id") or "").strip()
+    cur_mid = str(patch.get("model_id") or "").strip()
+    patch["model_id"] = _apply_default_if_unchanged(current=cur_mid, default_if_equals=base_mid, new_default=rec_mid)
+
+    merged = ctx.deep_update(base_cfg, patch)
+    out_cfg_path = ctx.write_yaml(ctx.config_out_dir / "inference_optimize.yaml", merged)
+    print(f"[inference optimize] config saved: {out_cfg_path}")
+
+    from automl_lib.cli.common import clearml_avoid_task_reuse
+    from automl_lib.workflow import run_inference
+
+    clearml_avoid_task_reuse()
+    info = run_inference(out_cfg_path) or {}
+    print("[inference optimize] result:")
+    print(json.dumps(info, ensure_ascii=False, indent=2, default=str))
+
+    summary_task_id = str(info.get("task_id") or "").strip() or None
+    child_task_ids = list(info.get("child_task_ids") or [])
+    output_dir = Path(str(info.get("output_dir") or "")) if info.get("output_dir") else None
+
+    print(f"summary_task_id: {summary_task_id}")
+    print(f"summary_link: {task_url(summary_task_id)}")
+
+    df_trials = None
+    if output_dir and (output_dir / "trials.csv").exists():
+        try:
+            df_trials = pd.read_csv(output_dir / "trials.csv")
+        except Exception:
+            df_trials = None
+
+    goal = str(((merged.get("search") or {}).get("goal") or "max")).strip().lower()
+    top_k = int(((merged.get("search") or {}).get("top_k") or 10))
+    top_k = max(1, top_k)
+
+    if df_trials is not None and not df_trials.empty and "prediction" in df_trials.columns:
+        df = df_trials.copy()
+        df["prediction"] = pd.to_numeric(df["prediction"], errors="coerce")
+        df = df.dropna(subset=["prediction"])
+        if "trial_index" not in df.columns:
+            df["trial_index"] = range(len(df))
+        df = df.sort_values("trial_index", kind="mergesort")
+        if goal == "min":
+            df["best_so_far"] = df["prediction"].cummin()
+        else:
+            df["best_so_far"] = df["prediction"].cummax()
+        print("\n--- Optimization log (tail) ---")
+        display_scrollable_df(df[["trial_index", "prediction", "best_so_far"]].tail(30), max_rows=30, max_height_px=320)
+
+        ascending = True if goal == "min" else False
+        df_rank = df.sort_values("prediction", ascending=ascending, kind="mergesort")
+        df_topk = df_rank.head(top_k)
+        print("\n--- TopK (conditions + prediction) ---")
+        display_scrollable_df(df_topk, max_rows=min(top_k, 50), max_height_px=360)
+    else:
+        print("trials.csv が見つからない/空のため TopK 表示をスキップしました")
+
+    print("\n--- Prediction_runs ---")
+    print(f"child_tasks: {len(child_task_ids)}")
+    try:
+        if child_task_ids:
+            from clearml import Task  # type: ignore
+
+            t0 = Task.get_task(task_id=str(child_task_ids[0]))
+            print(f"child_project: {getattr(t0, 'project', '')}")
+            print(f"child_task_link_example: {t0.get_output_log_web_page()}")
+    except Exception:
+        pass
+
+    ctx.update_state(
+        {
+            "inference_optimize": {
+                "summary_task_id": summary_task_id,
+                "child_task_ids": child_task_ids,
+                "output_dir": str(output_dir) if output_dir else None,
+            }
+        }
+    )
+    print(f"[inference optimize] state saved: {ctx.state_path}")
+    return info
+

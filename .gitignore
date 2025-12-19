@@ -7,12 +7,23 @@ __pycache__/
 
 ## Virtual environments
 .venv/
+.venv*/
 venv/
 env/
 ENV/
 
 ## Local outputs / artifacts
 outputs/
+catboost_info/
+
+## Local notes
+memo.md
+
+## Coverage / test artifacts
+.coverage
+htmlcov/
+.pytest_cache/
+.ruff_cache/
 
 ## ClearML local config (contains credentials)
 clearml.conf

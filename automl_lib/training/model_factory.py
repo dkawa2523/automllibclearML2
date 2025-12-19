@@ -29,7 +29,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional
 
 import warnings
 from sklearn.compose import TransformedTargetRegressor
@@ -38,7 +38,6 @@ from sklearn.preprocessing import StandardScaler
 
 from automl_lib.config.schemas import ModelSpec
 from automl_lib.registry.models import resolve_model_class
-from .tabpfn_utils import build_fallback_regressor_spec
 
 _TABPFN_DEFAULT_MODEL_FILES = {
     "classification": "tabpfn-v2-classifier-finetuned-zk73skhh.ckpt",
@@ -81,22 +80,6 @@ def prepare_tabpfn_params(problem_type: str, params: Dict[str, Any]) -> Optional
     if model_path_val is None or (isinstance(model_path_val, str) and model_path_val.lower() == "auto"):
         cached_path = _get_tabpfn_cached_model_path(problem_key)
         if cached_path is None:
-            if problem_key == "regression":
-                spec = build_fallback_regressor_spec()
-                if spec is not None:
-                    normalized.pop("model_path", None)
-                    normalized.setdefault("ignore_pretraining_limits", True)
-                    normalized.setdefault("random_state", 0)
-                    normalized["use_fallback_tabpfn"] = True
-                    return normalized
-                url = _TABPFN_MODEL_URLS.get(problem_key, "")
-                location = os.environ.get("TABPFN_MODEL_CACHE_DIR", "TABPFN_MODEL_CACHE_DIR")
-                warnings.warn(
-                    "Skipping TabPFN because pretrained weights were not found locally. "
-                    f"Download the model from {url} and place it under {location} or specify "
-                    "'model_path' in the configuration."
-                )
-                return None
             url = _TABPFN_MODEL_URLS.get(problem_key, "")
             location = os.environ.get("TABPFN_MODEL_CACHE_DIR", "TABPFN_MODEL_CACHE_DIR")
             warnings.warn(

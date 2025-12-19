@@ -28,17 +28,17 @@ def main() -> None:
         help="Optional path to preprocessing config YAML (default: config_preprocessing.yaml if exists).",
     )
     parser.add_argument(
-        "--comparison-config",
+        "--inference-config",
         type=Path,
         default=None,
-        help="Optional path to comparison config YAML (default: config_comparison.yaml if exists).",
+        help="Optional path to inference config YAML (default: inference_config.yaml if exists).",
     )
     parser.add_argument(
         "--mode",
         type=str,
-        default="auto",
-        choices=["auto", "clearml", "in_process"],
-        help="Execution mode: auto (default), clearml (PipelineController), in_process (call phases directly).",
+        default="clearml",
+        choices=["clearml"],
+        help="Execution mode: clearml (PipelineController) only.",
     )
     parser.add_argument(
         "--output-info",
@@ -59,7 +59,7 @@ def main() -> None:
         data_registration_config=args.datareg_config,
         data_editing_config=args.editing_config,
         preprocessing_config=args.preproc_config,
-        comparison_config=args.comparison_config,
+        inference_config=args.inference_config,
     )
     try:
         print_and_write_json(result, args.output_info)

@@ -1,53 +1,16 @@
-from .utils import (
-    init_task,
-    create_child_task,
-    load_input_model,
-    register_dataset,
-    register_output_model,
-    disable_resource_monitoring,
-)
-from .datasets import (
-    file_md5,
-    hash_tag_for_path,
-    find_first_csv,
-    ensure_local_dataset_copy,
-    dataframe_from_dataset,
-    find_first_dataset_id_by_tag,
-    add_tags_to_dataset,
-    register_dataset_from_path,
-)
-from .logging import (
-    report_hyperparams,
-    report_hyperparams_sections,
-    report_table,
-    report_scalar,
-    report_plotly,
-    report_image,
-    upload_artifacts,
-)
-from .clone import clone_task
+"""Compatibility wrapper (deprecated): `automl_lib.clearml` -> `automl_lib.integrations.clearml`."""
 
-__all__ = [
-    "init_task",
-    "create_child_task",
-    "load_input_model",
-    "register_dataset",
-    "register_output_model",
-    "disable_resource_monitoring",
-    "file_md5",
-    "hash_tag_for_path",
-    "find_first_csv",
-    "ensure_local_dataset_copy",
-    "dataframe_from_dataset",
-    "find_first_dataset_id_by_tag",
-    "add_tags_to_dataset",
-    "register_dataset_from_path",
-    "report_hyperparams",
-    "report_hyperparams_sections",
-    "report_table",
-    "report_scalar",
-    "report_plotly",
-    "report_image",
-    "upload_artifacts",
-    "clone_task",
-]
+from __future__ import annotations
+
+import os
+import warnings
+
+flag = str(os.environ.get("AUTO_ML_SUPPRESS_WARNINGS", "1")).strip().lower()
+if flag not in {"0", "false", "no", "off"}:
+    warnings.warn(
+        "`automl_lib.clearml` is deprecated; use `automl_lib.integrations.clearml` instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
+from automl_lib.integrations.clearml import *  # noqa: F401,F403

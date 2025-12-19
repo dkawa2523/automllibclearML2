@@ -22,7 +22,7 @@ class ClassificationPlotPaths:
 
 def _as_labels(labels: Optional[Sequence[object]], y_true: np.ndarray, y_pred: np.ndarray) -> Optional[List[object]]:
     if labels:
-        out = [l for l in labels]
+        out = [label for label in labels]
         return out if out else None
     try:
         vals = list(pd.unique(pd.Series(list(y_true) + list(y_pred))))
@@ -57,9 +57,9 @@ def _plot_matrix(
         fig, ax = plt.subplots(figsize=(size, size))
         ax.imshow(matrix, cmap=cmap)
         ax.set_xticks(range(len(labels)))
-        ax.set_xticklabels([str(l) for l in labels], rotation=45, ha="right")
+        ax.set_xticklabels([str(label) for label in labels], rotation=45, ha="right")
         ax.set_yticks(range(len(labels)))
-        ax.set_yticklabels([str(l) for l in labels])
+        ax.set_yticklabels([str(label) for label in labels])
         ax.set_xlabel("Predicted")
         ax.set_ylabel("True")
         ax.set_title(str(title))
@@ -125,7 +125,7 @@ def save_confusion_matrices(
     if cm is None:
         return ClassificationPlotPaths()
 
-    cm_df = pd.DataFrame(cm, index=[str(l) for l in labs], columns=[str(l) for l in labs])
+    cm_df = pd.DataFrame(cm, index=[str(label) for label in labs], columns=[str(label) for label in labs])
     csv_path = out_dir / f"{base_name}.csv"
     png_path = out_dir / f"{base_name}.png"
     try:
@@ -157,7 +157,7 @@ def save_confusion_matrices(
     norm_csv_path = out_dir / f"{base_name}_normalized.csv"
     norm_png_path = out_dir / f"{base_name}_normalized.png"
     if cm_norm is not None:
-        cm_norm_df = pd.DataFrame(cm_norm, index=[str(l) for l in labs], columns=[str(l) for l in labs])
+        cm_norm_df = pd.DataFrame(cm_norm, index=[str(label) for label in labs], columns=[str(label) for label in labs])
         try:
             cm_norm_df.to_csv(norm_csv_path, index=True)
         except Exception:
@@ -376,4 +376,3 @@ def iter_existing_paths(paths: Iterable[Optional[Path]]) -> List[Path]:
         if isinstance(p, Path) and p.exists():
             out.append(p)
     return out
-

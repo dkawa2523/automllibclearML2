@@ -27,17 +27,10 @@ class TrainingInfo(BaseModel):
     dataset_id: Optional[str] = None
     task_id: Optional[str] = None
     training_task_ids: List[str] = Field(default_factory=list)
+    recommended_model_id: Optional[str] = None
+    recommended_model_task_id: Optional[str] = None
+    recommended_model_name: Optional[str] = None
     metrics: Optional[List[Dict[str, Any]]] = None
-    run_id: Optional[str] = None
-
-
-class ComparisonInfo(BaseModel):
-    """
-    Comparison phase output structure.
-    """
-
-    task_id: Optional[str] = None
-    artifacts: List[str] = Field(default_factory=list)
     run_id: Optional[str] = None
 
 

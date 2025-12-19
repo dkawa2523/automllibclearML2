@@ -1,516 +1,705 @@
-# automl_lib_clearML 拡張コード実装計画（Codex / VSCode向け・段階実装）
+# docs/REFORM_PLAN.md
 
-> 目的：**ユーザー（ML非専門）**が ClearML 上で「結果の把握・参照・業務活用」まで迷わず辿れること。
-> 目的：**開発者**が ClearML/各ライブラリ仕様を深掘りしなくても、拡張ポイント（前処理/モデル/評価/可視化/情報付与）を守れば安全に追加できること。
-> 注意：**「Phase 9（推論タスクの単一/複数条件/最適化の“見やすさ改善”）」は将来実装**。今回の実装には含めず、**将来実装しやすい設計（データ構造・命名・タグ・I/Oの布石）**に留めます。
+# automllibclearML2 リファクタリング提案計画（ClearML × Table AutoML）
 
----
-
-## 0. 現状アーキテクチャ要約（前提の共有）
-
-このリポジトリは概ね以下の責務分割になっています（README_dev とコードからの整理）：
-
-* `automl_lib/cli/`
-
-  * `run_<phase>.py` が入口（config を読み、フェーズ処理を呼ぶ）
-* `automl_lib/phases/<phase>/processing.py`
-
-  * 各フェーズの主処理（前処理、学習、比較…）
-* `automl_lib/phases/<phase>/clearml_integration.py`
-
-  * ClearML Task生成、親子リンク、Artifacts/Hyperparameters登録（現状は薄い）
-* `automl_lib/clearml/`
-
-  * `utils.py`：`init_task` / `create_child_task` / model登録 / dataset登録など
-  * `datasets.py`：dataset local copy / hash tag / CSV探索など
-  * `logging.py`：`report_hyperparams()` など（現状は `task.connect(dict)` で **General 1枚**になりがち）
-* `automl_lib/pipeline/controller.py`
-
-  * `PipelineController` or `in_process` の実行モード
+> **目的（ユーザー / 非ML）**: dataset_id を入力して Pipeline 実行 → ClearML上で結果を見て「どのモデルを推論に使うか」を迷わず決められる。
+> **目的（開発者）**: ClearML/各ライブラリ仕様を深掘りしなくても、定めた拡張ポイント（前処理/モデル/評価/可視化/情報付与）を守れば安全に追加できる。
 
 ---
 
-## 1. 今回の実装で達成する「大きな成果物（ユーザーに見える変化）」
+## 0. このドキュメントの前提（重要）
 
-### ユーザー視点（ClearML UIで起きる改善）
+* ここでは **「実装できる粒度の計画」**を提示します（設計方針 + フォルダ構成 + タスク責務 + ClearML UI設計 + 実装手順 + 削除手順）。
+* **実ファイルの“削除対象リスト”は、必ずリポジトリ内で静的解析 + 実行トレースで確定**させます（手順は後述）。
 
-* タスク/データセットが散らからず、**“このRunに関係するものだけ”**をすぐ追える
-  → **run_id（タグ/命名/プロジェクト規約）**で統一
-* Configuration → Hyperparameters が **General 1枚から「カテゴリ分割」**され、設定も結果追跡も簡単
-  → Data / Preprocessing / Model / CV / Evaluation / ClearML / Output…など
-* 前処理タスクに **データ分布や欠損、ターゲット分布等のPlots/テーブル**が出る
-  → “何が起きたか”をML非専門でも把握できる
-* 学習タスク（親・子）に **比較しやすいScalars（指標・時間）**が揃い、考察が進む
-  → Comparison は “まとめ” だが、個別タスクでも理解できる
-* 比較タスクで大量組合せを **TopK・モデル別集計・勝率**などで俯瞰できる（Artifacts / Plots / Tables を強化）
-
-### 開発者視点（拡張しやすい変化）
-
-* 「どこを編集すれば、Plots/Scalars/Artifacts/Debug samplesを追加できるか」が明確
-  → phaseごとに `meta.py / visualization.py / clearml_integration.py` を標準化
-* “RunContext（run_id / project / tags / dataset_key）” を中心に設計
-  → 機能追加でも命名・タグがブレない
-* （重要）**Clone実行モード**の導入で、テンプレタスクを複製して即実行できる
+  * ※本チャット環境から `automllibclearML2` の実コードを直接参照できないため、「調査して削除」部分は **再現可能な自動抽出プロセス**として提示します。
 
 ---
 
-## 2. 実装ロードマップ（Phase 1〜8が今回対象、Phase 9は設計のみ）
+## 1. ゴール体験（ClearML上のユーザージャーニー）
 
-### Phase 1：RunContext導入（全拡張の土台）
+### 1.1 ユーザー（非ML）の最短導線
 
-**狙い**：タスク/データセットの散乱を止める「共通キー」を作る（run_id・タグ・命名の一貫性）。
+1. **Pipelineタスク**（Controller）を開く
+2. `dataset_id` を入力して実行
+3. 生成された **Training Summary（親タスク）**を開く
+4. 見る場所は固定：
 
-#### 追加/修正するもの
+   * `Configuration` → 「Training」だけ確認（余計なパラメータは出ない）
+   * `Plots` → 上部に **Leaderboard（モデル比較）**と **Recommended Model** がある（詳細は出ない）
+   * `Artifacts` → `leaderboard.csv` / `results_summary.csv` をダウンロードできる
+   * `Models`（または Artifact内の model_id） → 推論に使う **model_id** をコピー
+5. **Inferenceタスク**に model_id を入力して実行
+6. 推論モード（single / batch / optimize）ごとに、必要な出力が `Artifacts / Plots` に保存されている
 
-* ✅ 新規：`automl_lib/run_context.py`（or `automl_lib/clearml/context.py`）
-* ✅ 修正：`automl_lib/config/schemas.py`（`run.*` と `clearml.naming.*` を追加）
-* ✅ 修正：`automl_lib/pipeline/controller.py`（run_id を pipeline 全体で維持）
-* ✅ 修正：`automl_lib/types/phase_io.py`（DatasetInfo/TrainingInfo/ComparisonInfo に `run_id?: str` を追加：**optional**）
+### 1.2 開発者の最短導線
 
-#### RunContext（最小仕様）
+* 追加したい対象ごとに編集場所が **一意**である：
 
-```python
-@dataclass(frozen=True)
-class RunContext:
-    run_id: str                 # 例: 20251213-153012-a1b2c3
-    user: str                   # OS user or config
-    project_root: str           # clearml.project_name
-    dataset_project: str        # clearml.dataset_project
-    dataset_key: str            # dataset_id短縮 or csv stem
-    tags_base: list[str]        # ["run:<run_id>", "dataset:<dataset_key>"]
+  * 前処理を追加 → `core/preprocessing/` か `registry/preprocessors.py`
+  * モデル追加 → `registry/models.py`
+  * 指標追加 → `registry/metrics.py`
+  * 可視化追加 → `workflow/<phase>/visualization.py`
+  * ClearMLログ変更 → `integrations/clearml/*` と `workflow/<phase>/clearml_integration.py`
+
+---
+
+## 2. “タスクは独立実行できる”を満たす全体設計
+
+### 2.1 タスク一覧（責務分離）
+
+| Task                                | 役割                              | 入力                               | 出力（次工程へ渡すもの）                                   |
+| ----------------------------------- | ------------------------------- | -------------------------------- | ---------------------------------------------- |
+| dataset_register                    | 生データを ClearML Dataset として登録（任意） | ローカルCSV等                         | dataset_id                                     |
+| preprocess                          | dataset_id を受けて前処理 → 新Dataset作成 | dataset_id                       | preprocessed_dataset_id + preprocessing_bundle |
+| train_parent                        | モデル候補を列挙し、子タスクで学習・評価を実行、結果集計    | dataset_id（raw or preprocessed）  | recommended_model_id / leaderboard.csv         |
+| train_model (child)                 | 特定モデル1つを学習・評価（単独運用も可能）          | dataset_id + model_name + params | model_id + 評価指標 + 詳細PLOTS                      |
+| infer_parent                        | 推論を束ねる（モード別子タスクを起動）             | model_id + inference_config      | mode別出力                                        |
+| infer_single/batch/optimize (child) | 推論モードごとの実処理                     | model_id + mode_params           | 予測結果、最適化結果など                                   |
+
+> **Pipeline実行** = 上記の独立タスクを順に繋ぐだけ（Pipelineのためにタスクが“別物”にならない）
+
+---
+
+## 3. ClearML UI設計（HyperParameters / Properties / Artifacts / Plots の置き場所ルール）
+
+### 3.1 原則（重要）
+
+* **HyperParameters**: “そのタスクの入力設定”だけ（ユーザーが編集して再実行したい項目だけ）
+* **User Properties**: タスクの説明/検索/誤認防止のための “結果の要約・識別情報”
+
+  * ClearMLでは User Properties はタスクの `Configuration > USER PROPERTIES` に表示され、後から編集可能（検索・列表示にも使える） ([ClearML][1])
+* **Artifacts**: 長文/一覧/表/再現に必要なファイル（config全体、前処理レシピ、leaderboard、推論結果）
+* **Plots**: 意思決定に必要な可視化のみ。
+
+  * 親タスクは “比較・要約”
+  * 子タスクは “詳細分析（散布図、SHAP、残差、重要度…）”
+
+### 3.2 HyperParameters 汚染（関係ないパラメータが出る）を止める
+
+**原因の典型**:
+
+* `Task.init()` の自動収集（argparse 等）で “全CLI引数” が吸い上げられている
+* 1つの巨大configを全タスクで `task.connect()` している（＝各タスクに不要な設定まで出る）
+
+**対策（必須）**:
+
+* `Task.init(..., auto_connect_arg_parser=False)` で自動吸い上げを止める
+
+  * ClearMLは `auto_connect_arg_parser` で argparse由来の自動ロギングを制御可能 ([ClearML][2])
+* 各タスクで `task.connect()` する辞書は **そのタスクの入力設定に限定**
+
+  * それ以外（参照用情報、派生情報、全config）は Artifact（YAML/JSON）へ
+
+---
+
+## 4. データセット設計（前処理の再現性 + 逆変換 + 確認性）
+
+### 4.1 Dataset “契約”（preprocessed dataset の中身）
+
+前処理データセットは「学習・推論が必要な情報を必ず持つ」。推奨ファイル構成：
+
+```
+dataset/
+  data_raw.parquet               # (任意) 元データ保持。容量が大きければ省略可
+  data_processed.parquet         # 学習に使う前処理済み特徴量+目的変数
+  schema.json                    # 入力列/目的列/型/ID列/分割キー等
+  preprocessing/
+    bundle.joblib                # fitted transformer一式（特徴・目的変換 + 逆変換）
+    summary.md                   # 人間が読む要約（カテゴリ別）
+    recipe.json                  # 変換手順（カテゴリ別、短文・構造化）
+    version.txt                  # 前処理契約バージョン
+  manifest.json                  # lineage（親dataset_id / task_id / run_id 等）
 ```
 
-#### run_id 生成規約（デフォルト）
+### 4.2 前処理の “カテゴリ別に確認できる” 表示（要件対応）
 
-* `YYYYMMDD-HHMMSS-<6hex>`（衝突しづらく、UIで時系列追える）
-* ただし config に `run.id` が指定されればそれを優先
+`preprocessing/summary.md` のテンプレ（例）：
 
-#### パイプライン/フェーズ間で run_id を維持する方法
+```md
+# Preprocessing Summary
 
-* `run_pipeline` の入口で run_id を確定し、環境変数に入れる
+## Dataset Lineage
+- parent_dataset_id: <...>
+- preprocessing_task_id: <...>
+- created_at: <ISO8601>
+- contract_version: v1
 
-  * `AUTO_ML_RUN_ID=<run_id>`
-* PipelineController の function step にも `run_id` を `function_kwargs` で明示的に渡せるようにする（将来の堅牢化）
+## Input Features
+### Type Inference
+- numerical: [...]
+- categorical: [...]
+- datetime: [...]
+- dropped: [...]
 
-#### Done（受け入れ条件）
+### Missing Values
+- strategy_numeric: median
+- strategy_categorical: most_frequent
+- columns_with_missing_top20:
+  - col_a: 123 (4.1%)
+  - col_b: 98  (3.2%)
 
-* 同じ pipeline 実行で作られたタスク/データセットに `run:<run_id>` が付く（次Phaseで実装）
-* `--output-info` の JSON に `run_id` が入る（optional）
+### Encoding
+- onehot: [col_x, col_y]
+- ordinal: []
+- handle_unknown: ignore
 
----
+### Scaling
+- method: standard
+- columns: [...]
 
-### Phase 2：命名/タグ規約の実装（散らかり対策の本丸）
+## Target
+- target_column: y
+- transform: standardize
+- inverse_transform: enabled
 
-**狙い**：ユーザーが ClearML で迷子にならない。プロジェクト階層がユーザーごとにブレても、最低限 run_id で追える。
-
-#### 追加/修正するもの
-
-* ✅ 新規：`automl_lib/clearml/naming.py`
-* ✅ 修正：`automl_lib/clearml/utils.py::init_task()`（tagsの付与を標準化できるように）
-* ✅ 修正：各 `phases/*/clearml_integration.py`（create_*_task で naming/tags を利用）
-* ✅ 修正：`clearml/datasets.py::register_dataset_from_path()` 呼び出し側（dataset name/tags を統一）
-
-#### 命名規約（提案）
-
-* **Task名**（例）
-
-  * preprocessing: `preprocessing [<dataset_key>] [<run_id>]`
-  * training summary: `training-summary [<dataset_key>] [<run_id>]`
-  * child model: `train [<preproc_id>] [<model_name>] [<run_id>]`
-  * comparison: `comparison [<dataset_key>] [<run_id>]`
-* **Project階層**（デフォルトは “深くしすぎない”）
-
-  * `AutoML/<user>/<dataset_key>`
-  * 子タスクだけは `.../train_models` に逃がす（既存実装を踏襲しつつ改善）
-* **Tags**（最低限）
-
-  * `run:<run_id>`
-  * `phase:<phase>`
-  * `dataset:<dataset_key>`
-  * `preprocess:<preproc_id>`（ある場合）
-  * `model:<model_name>`（ある場合）
-
-#### “プロジェクトがまちまち”問題への施策（複数）
-
-* **施策A（必須）**：run_idタグで追える（検索・絞り込みの最小保証）
-* **施策B（推奨）**：project path builder を導入して default を統一（ただし override 可）
-* **施策C（オプション）**：`clearml.tags` に `team:<...>` など追加できる設計
-
-#### Done
-
-* preprocessing/training/comparison で Task名と tags が規約通りになる
-* training child task の名前に `preproc_id` を含めて区別できる
-
----
-
-### Phase 3：Clone実行モード（テンプレ複製で “毎回作るコスト” を削減）
-
-**狙い**：一度作ったタスク（前処理/学習/比較/推論/パイプライン）をテンプレとして複製し、最小変更で再実行できる。
-
-> 重要：ClearML UI でも clone は可能ですが、**CLI/設定から clone → enqueue を一気通貫**にすると「ML非専門」でも迷わず回せます。
-
-#### 追加/修正するもの
-
-* ✅ 新規：`automl_lib/clearml/clone.py`（or `utils.py` に追加）
-* ✅ 新規：`automl_lib/cli/run_clone.py`（テンプレtask_id を渡して複製実行）
-* ✅ 修正：`config/schemas.py`
-
-  * `clearml.execution_mode: "new" | "clone"`
-  * `clearml.template_task_id: str?`（フェーズ共通でまず1個）
-  * （将来）`clearml.templates.{preprocessing,training,comparison,inference,pipeline}` に拡張可能な設計にする
-
-#### CLI 仕様（最小）
-
-* `python -m automl_lib.cli.run_clone --task-id <TEMPLATE_TASK_ID> --queue <queue?> --overrides <json/yaml?>`
-
-overrides 例（将来の拡張前提で設計だけ）
-
-```yaml
-overrides:
-  data.dataset_id: "xxxxxxxx..."
-  preprocessing.scaling: ["standard"]
-  models[0].params.n_estimators: 500
+## Split / Leakage Control
+- split_key: <...|none>
+- leakage_guard: <description>
 ```
 
-#### 実装方針
-
-* ClearML API の `Task.clone()` を利用（clone → 必要ならパラメータ上書き → enqueue）
-* cloneされたタスクには
-
-  * `run:<new_run_id>` を付与
-  * `cloned_from:<template_task_id>` タグを付与
-* **new_run_idは必ず発行**（テンプレと同一runに混ざらない）
-
-#### Done
-
-* テンプレ task_id を指定すると clone が作成され、queue に投入できる
-* clone後の task に run_id/tag が付与される
+> **学習タスク側**は dataset_id からこの `summary.md` / `recipe.json` を読み、
+>
+> * “1行の長文”ではなく、**カテゴリ別に整形した同じ構造**で `Artifacts` に再掲
+> * さらに重要項目だけを **User Properties** に抜粋（例：target_transform, scaling, encoding）
 
 ---
 
-### Phase 4：Hyperparameters をカテゴリ分割（General 1枚問題を解消）
+## 5. Training設計（親タスクはシンプル、子タスクで詳細）
 
-**狙い**：設定が見やすく、結果の追跡も「何を変えたか」が一瞬で分かる。
+### 5.1 親タスク（Training Summary）の責務
 
-#### 追加/修正するもの
+* 全モデルの結果を集計し、**意思決定**に必要な最小情報だけを提示する
+* **PLOTSは厳選**（多すぎる問題を根絶）
+* 「推論に使う model_id がどれか」を一瞬で分かるようにする
 
-* ✅ 修正：`automl_lib/clearml/logging.py`
+**親タスクに残す Plots（推奨）**
+（ClearMLの表示順を安定させるため **title prefix** を必須化）
 
-  * `report_hyperparams()` を拡張（互換維持）
-  * 新規：`report_hyperparams_sections(task, sections: dict[str, dict])`
-* ✅ 修正：各 `phases/*/clearml_integration.py`
+* `01_Overview/RecommendedModel`（表 or テキスト）
+* `02_Leaderboard/MetricBar`（主要指標でモデル比較）
+* `03_Leaderboard/MetricTable`（上位Nの表）
+* `04_Tradeoff/Metric_vs_Latency_or_ModelSize`（任意）
+* それ以外（散布図、SHAP、残差…）は **一切置かない**
 
-  * `report_hyperparams(task, config)` から `report_hyperparams_sections()` へ移行
-* ✅ 修正：training child task にもカテゴリ分割を適用（Modelセクションを強調）
+**親タスクの User Properties（例）**
 
-#### セクション案（例）
+* `run_id`
+* `dataset_id`
+* `dataset_role` = `raw` / `preprocessed`
+* `target_column`
+* `primary_metric`
+* `recommended_model_name`
+* `recommended_model_id`（推論用）
+* `leaderboard_top1_score`
 
-* `Data`
-* `Preprocessing`
-* `Model`
-* `CrossValidation`
-* `Evaluation`
-* `Optimization`
-* `Output`
-* `ClearML`
+**親タスクの Artifacts（例）**
 
-#### 具体の変換ルール（Codex実装ガイド）
+* `leaderboard.csv`（全モデル比較）
+* `results_summary.csv`（評価詳細）
+* `training_config.yaml`（再現用：ただし HyperParams には出さない）
+* `preprocessing_summary.md`（再掲）
+* `error_models.json`（一部モデル失敗時の理由）
 
-* pydantic config の `cfg.model_dump()` をそのまま繋ぐのではなく、部分dictを切り出す
-* list/dict が複雑な部分（例：`models[]`）は
+### 5.2 子タスク（train_model）の責務
 
-  * summary task：`models` を “表示用に整形した dict” にして `ModelCandidates` セクションへ
-  * child task：`Model` セクションは “そのタスクが担当する1モデルのparamsのみ”
+* 1モデルの学習・評価・可視化・モデル登録まで完結
+* SHAP/散布図/残差/重要度など **重いPLOTSは子タスクに集約**
+* 単独運用（このタスクだけ回す）でも成立する
 
-#### Done
+**子タスクの HyperParameters（例）**
 
-* preprocessing / training-summary / child training / comparison で Hyperparameters が複数カテゴリに分かれる
+* `Input`: dataset_id, target_column
+* `Model`: model_name, model_params（そのモデルに関係するものだけ）
+* `Training`: cv, seed, early_stopping, etc（共通）
+* `Evaluation`: metric list（共通）
 
----
+**子タスクの Plots（例）**
 
-### Phase 5：前処理タスクのPlots/Artifacts拡張（ユーザーが理解できる前処理へ）
+* `01_Performance/Pred_vs_True`
+* `02_Performance/Residuals`
+* `03_Explain/FeatureImportance`
+* `04_Explain/SHAP_Summary`
+* `05_Diagnostics/...`
 
-**狙い**：「前処理で何が起きたか」をML非専門でも追える。
+**子タスクの Model登録**
 
-#### 追加/修正するもの
-
-* ✅ 新規：`automl_lib/phases/preprocessing/visualization.py`
-* ✅ 新規：`automl_lib/phases/preprocessing/meta.py`（軽量でもOK）
-* ✅ 修正：`automl_lib/phases/preprocessing/processing.py`
-
-  * 前処理後に `visualization` と `meta` を呼び、ClearML に出す
-
-#### Plots案（優先順）
-
-1. **ターゲット分布**（分類：クラス比、回帰：ヒスト/箱ひげ）
-2. **欠損サマリ**（列ごとの欠損数/率 上位N）
-3. **数値列の分布サマリ**（代表列のみ or サマリ統計）
-4. **前処理後特徴量数**（元の特徴量数→変換後の次元）
-5. （オプション）相関ヒートマップ（列が多い時は上位Nに制限）
-
-#### Artifacts案（小カテゴリ化）
-
-* `schema_raw.json`（列型推定、カテゴリ列、数値列）
-* `preprocess_pipeline.txt` or `preprocess_pipeline.json`（適用した手順）
-* `preprocessed_features.csv` は既に出ているが、名前に run/dataset_key を入れるのも検討
-
-#### Debug samples案
-
-* “変換前→変換後のサンプル行”を数行（PIIに注意。必要ならマスク関数を用意）
-
-#### Done
-
-* ClearML の preprocessing task の Plots に最低3種の可視化が出る
-* Artifacts に schema/pipeline 情報が出る
+* ClearML Model Registry に `model_id` として登録し、親タスクで一覧化
 
 ---
 
-### Phase 6：学習タスク（親・子）の “比較/考察しやすさ” を強化（Scalars/Plots/Debug）
+## 6. Inference設計（モード別タスク + “用途別Artifacts/PLOTS”）
 
-**狙い**：大量の組合せでも「どれが良いか」「なぜ良いか」を追える。
+### 6.1 推論タスク構成
 
-#### 追加/修正するもの（設計方針）
+* `infer_parent`: どのモードを回したかの要約とリンク
+* `infer_single`: 単発入力 → 予測値
+* `infer_batch`: 複数入力 → CSV等で返す
+* `infer_optimize`: 条件最適化 → 最適入力 + 目的値 + 探索ログ
 
-* ✅ 新規：`automl_lib/training/reporting/`（例）
+### 6.2 モード別の出力ルール（例）
 
-  * `report_scalars.py`（メトリクス/時間/サイズ）
-  * `report_plots.py`（混同行列/ROC/残差など）
-  * `report_debug_samples.py`
-* ✅ 修正：`automl_lib/training/run_automl`（内部）
+**infer_single**
 
-  * child task作成時に `run_context / tags / hyperparam sections` を適用
-  * 指標は `Logger.report_scalar` に統一タイトル規約で送る
-* ✅ 修正：`automl_lib/phases/training/clearml_integration.py`
+* User Properties: `model_id`, `prediction`
+* Artifacts: `input.json`, `output.json`
+* Plots: 必要なら感度（1D sweep）など
 
-  * child task name を `train [preproc] [model] [run_id]` にする
-  * child task tags に `preprocess:<...>` `model:<...>` を付与
+**infer_batch**
 
-#### Scalars（比較の土台）タイトル規約（例）
+* Artifacts: `predictions.csv`（必須）, `inputs.csv`（任意）
+* Plots: 上位/分布、ヒストグラムなど（任意）
 
-* `metric/<metric_name>`（single value：CV mean or holdout score）
-* `time/train_seconds`
-* `time/predict_seconds`
-* `model/num_features`
-* `model/num_rows_train`
-* `model/size_bytes`（保存している場合）
-* `model/params_count`（可能なら）
+**infer_optimize**
 
-> こうしておくと、ClearML の “Scalar Compare” で多タスク比較しやすい。
+* Artifacts: `best_solution.json`, `trials.csv`
+* Plots: 目的値推移、パラレル座標（任意）
 
-#### Plots（タスク種別に応じて）
-
-* regression：
-
-  * predicted vs actual
-  * residual histogram
-  * residual scatter
-* classification：
-
-  * confusion matrix（正規化版も）
-  * ROC / PR curve（可能なら）
-* 共通：
-
-  * feature importance（モデルが対応なら）
-  * SHAP（optional依存、ある時だけ）
-
-#### Done
-
-* 各 child task に scalars が揃っており、ClearML UI上で比較が成立する
-* training-summary に「最良モデル」のサマリ（table/markdown/artifact）が残る
+> 重要：推論結果は **目的変数の逆変換（標準化→元スケール）**を必ず適用して出力する
+> （前処理bundleに target_transformer を含める）
 
 ---
 
-### Phase 7：学習比較・評価タスクの拡張（大量組合せを “俯瞰” できる）
+## 7. 新ディレクトリ構成（提案：core / workflow / integrations / registry）
 
-**狙い**：比較タスクが「ランキング表を吐くだけ」ではなく、ユーザーが意思決定できる形にする。
-
-#### 追加/修正するもの
-
-* ✅ 修正：`automl_lib/phases/comparison/processing.py`
-
-  * TopKテーブルの report
-  * best_by_model / win_summary の report を強化
-* ✅ 修正：`automl_lib/phases/comparison/visualization.py`
-
-  * “モデル×前処理” のヒートマップ（指標別）
-  * run間比較（既にあるなら見せ方の改善）
-
-#### 追加するClearML出力（例）
-
-* Plots：
-
-  * heatmap（metric）
-  * model_summary bar chart（平均/分散）
-  * win_summary（勝率）
-* Tables：
-
-  * TopKランキング
-  * モデル別最良
-* Scalars：
-
-  * comparison/best_<metric>
-  * comparison/topk_mean_<metric>（任意）
-
-#### Done
-
-* comparison task を開けば「結論（推奨モデル）」と「根拠（ランキング/集計/図）」が揃う
-
----
-
-### Phase 8：開発者の拡張容易性（ファイル配置/ガイド/テスト）
-
-**狙い**：拡張ポイントが明確で、レビューもしやすい構造にする。
-
-#### 追加/修正するもの
-
-* ✅ 新規：`docs/DEV_GUIDE.md`（README_dev を補完でもOK）
-* ✅ 新規：`automl_lib/plugins/`（プロジェクト固有拡張の置き場）
-* ✅ 整理：`training/` 内の責務分割（reporting, evaluation, model_factory を明確化）
-* ✅ テスト追加：`tests/` に
-
-  * RunContext生成のテスト
-  * naming/tags のテスト
-  * hyperparam sections 生成のテスト（ClearML無しでも dict の形を検証）
-  * preprocessing visualization の “返り値/生成物” テスト（プロットは生成可否だけ）
-
-#### ディレクトリ構成（提案：段階導入でOK）
+> “どこを触れば何が変わるか”を明確にし、拡張しやすくするための抜本変更
 
 ```text
 automl_lib/
-  clearml/
-    bootstrap.py
-    datasets.py
-    logging.py
-    utils.py
-    naming.py        # NEW
-    clone.py         # NEW
-    context.py       # NEW (RunContext)
-  phases/
+  __init__.py
+
+  cli/
+    __init__.py
+    main.py
+    commands/
+      dataset_register.py
+      preprocess.py
+      train_parent.py
+      train_model.py
+      infer_parent.py
+      infer_single.py
+      infer_batch.py
+      infer_optimize.py
+      pipeline.py
+
+  config/
+    __init__.py
+    models.py                # pydantic等で型定義（推奨）
+    defaults/
+      pipeline.yaml
+      preprocess.yaml
+      training.yaml
+      inference.yaml
+
+  core/
+    data/
+      io.py                  # Datasetロード・保存、parquet/csv対応
+      schema.py              # 列型推論、target/feature定義
+      validation.py          # 入力チェック
     preprocessing/
-      processing.py
-      clearml_integration.py
-      visualization.py   # NEW
-      meta.py            # NEW
+      bundle.py              # PreprocessingBundle（transform + inverse）
+      build.py               # transformer構築
+      apply.py               # fit/transform, transform-only
+      report.py              # summary.md / recipe.json生成
     training/
+      trainer.py             # 学習ループ（ClearML非依存）
+      evaluation.py          # metric算出
+      leaderboard.py         # 集計・並び替え
+      model_io.py            # モデル永続化
+    inference/
+      predictor.py
+      modes/
+        single.py
+        batch.py
+        optimize.py
+
+  integrations/
+    clearml/
+      task_factory.py        # Task.init/Createの統一窓口
+      hyperparams.py         # connectする辞書を“最小化”する関数群
+      properties.py          # set_user_properties統一
+      artifacts.py           # upload_artifact統一
+      datasets.py            # ClearML Datasetのcreate/get/lineage
+      models.py              # Model Registry登録/参照
+      links.py               # 親子/関連タスクのリンク情報を付与
+
+  workflow/
+    dataset_register/
       processing.py
       clearml_integration.py
-    comparison/
+      meta.py
+    preprocess/
       processing.py
       clearml_integration.py
       visualization.py
       meta.py
-  training/
-    run_automl.py (or run.py)
-    reporting/           # NEW
-      scalars.py
-      plots.py
-      debug_samples.py
+    training/
+      parent_processing.py
+      model_processing.py
+      clearml_integration.py
+      visualization.py
+      meta.py
+    inference/
+      parent_processing.py
+      mode_processing.py
+      clearml_integration.py
+      visualization.py
+      meta.py
+    pipeline/
+      controller.py          # pipeline orchestration only
+      steps.py               # steps定義
+
+  registry/
+    models.py                # 追加はここ
+    metrics.py               # 追加はここ
+    preprocessors.py         # 追加はここ
+
+tests/
+  test_smoke_pipeline.py
+  test_preprocess_contract.py
+  test_training_leaderboard.py
+  test_inference_inverse_transform.py
+
+docs/
+  REFORM_PLAN.md
+  README_user.md
+  README_dev.md
 ```
 
-#### Done
+---
 
-* “どこを触れば何が変わるか”が分かる状態（新規開発者が迷わない）
-* 拡張のための最小テンプレ（preprocessor/model/metric/plot）が docs にまとまっている
+## 8. Config設計（“タスク別に必要な設定だけ”を扱う）
+
+### 8.1 pipeline.yaml（例：ユーザーが触る最小）
+
+```yaml
+run:
+  project: "AutoML"
+  experiment_name: "AutoML Pipeline"
+  tags: ["team:xxx"]
+  clearml:
+    enabled: true
+    queue: "default"
+    task_reuse: false
+
+input:
+  dataset_id: "CLEARML_DATASET_ID"
+  target_column: "y"
+
+preprocess:
+  enabled: true
+  missing_values:
+    numeric: "median"
+    categorical: "most_frequent"
+  encoding:
+    categorical: "onehot"
+  scaling:
+    numeric: "standard"
+  target_transform:
+    method: "standardize"
+
+training:
+  models: ["lgbm", "xgboost", "rf"]
+  cv:
+    folds: 5
+    seed: 42
+  metric:
+    primary: "rmse"
+    additional: ["mae", "r2"]
+  save_models: true
+  leaderboard:
+    top_k: 5
+
+inference:
+  enabled: false
+  model_id: ""
+  mode: "single"
+  single:
+    input_json: "examples/single_input.json"
+```
+
+### 8.2 “HyperParametersに出す/出さない”のルール（実装側）
+
+* `task.connect()` する辞書は、上記 config から **phaseに必要な部分だけ抽出**
+* config全体は `task.connect_configuration(...)` か Artifact（`full_config.yaml`）で保存
+
+  * UI上は “Configuration Objects / Artifacts” として参照用に置く（誤認防止）
 
 ---
 
-## 3. Phase 9（将来）：推論タスク見やすさ改善（今回は実装しない、設計のみ）
+## 9. ClearML安定化（Fail多発/タスク見えない/summary出ない問題への対処）
 
-**今回やらないこと（明確化）**
+### 9.1 Task再利用で “上書き/見えない” を防ぐ
 
-* 推論タスク（単一条件/複数条件/最適化）それぞれの UI 改善の実装はしない
-* ただし、将来やりやすくするために以下は “今回の設計に織り込む”
+ClearMLは条件次第で Task を再利用するため、デバッグ中に「タスクが増えない/期待と違う」状態が起きやすい。
+→ すべての本番/検証実行で `reuse_last_task_id=False` を明示する（推奨） ([ClearML][2])
 
-### 今回の設計に入れる “布石”
+### 9.2 “関係ないHyperParameters”が混入するのを防ぐ
 
-* `InferenceInfo` に `run_id` を持てる（optional）
-* 推論タスクでも `RunContext` / naming / tags が自然に適用できる設計
-* `automl_lib/phases/inference/` を phase標準構造（processing/meta/visualization/clearml_integration）で追加できる前提にしておく
-  ※ directory は作っても良いが、中身は最小スタブに留める（今回の実装対象外）
+* `auto_connect_arg_parser=False`（argparse由来の自動収集を無効化） ([ClearML][2])
+* `Task.connect()` は **必要最小**の辞書のみ
+* それ以外は User Properties / Artifactsへ
 
----
+### 9.3 pipelineタスクが表示されない/Failする典型原因と対策
 
-## 4. PR分割（Codexが実装しやすい“粒度”の提案）
+* **Agentがいない queue に enqueue**している
 
-### PR1：RunContext + 命名/タグ（Phase1-2）
+  * 対策: queue名の検証（起動時に “queue exists & has agent” をチェック）
+  * 対策: Pipelineをローカル実行モードも選べる設計にして、Agentなしでも回せる
+* **子タスク作成のやり方が不安定**（Task.init多重、close漏れ）
 
-* [ ] `RunContext` 実装
-* [ ] `naming.py` 実装
-* [ ] preprocessing/training/comparison の create_task が命名規約を使用
-* [ ] datasets 登録タグに run_id を追加
+  * 対策: 1プロセスにつき “main taskは1つ” を守る（Taskの注意） ([ClearML][3])
+  * 対策: 子タスクは `Task.create()` を基本にし、logger/ artifact をその task object へ明示的に流す
 
-### PR2：Clone実行モード（Phase3）
+### 9.4 summaryが作成されない問題（設計で潰す）
 
-* [ ] `clearml/clone.py` 追加
-* [ ] `cli/run_clone.py` 追加
-* [ ] config に execution_mode / template_task_id（最小）を追加
+* ある子タスクが失敗すると、親タスクが集計前に落ちる → summaryが出ない
 
-### PR3：Hyperparameterカテゴリ分割（Phase4）
-
-* [ ] `report_hyperparams_sections` 追加
-* [ ] preprocessing/training/comparison で sections を適用
-* [ ] child task の Model セクション分離
-
-### PR4：前処理Plots/Artifacts（Phase5）
-
-* [ ] preprocessing visualization/meta 追加
-* [ ] processing から呼ぶ
-* [ ] Debug samples（任意）
-
-### PR5：学習のScalars/Plots強化（Phase6）
-
-* [ ] training/reporting を作成
-* [ ] run_automl 側に組み込み
-* [ ] “比較できる scalar 命名規約” を統一
-
-### PR6：比較タスクの俯瞰強化（Phase7）
-
-* [ ] TopK/heatmap/win_summary の強化
-* [ ] Tables/Scalars を増やす
-
-### PR7：開発者ガイド/構造/テスト（Phase8）
-
-* [ ] docs 追加
-* [ ] tests 拡充
-* [ ] plugins 置き場追加
+  * 対策: 親タスクは “部分成功” を許容し、失敗モデルは `error_models.json` に記録して集計は継続
+  * 対策: `leaderboard.csv` は **最後に必ず artifact upload + flush** する（finallyブロック）
 
 ---
 
-## 5. 実装上の運用課題と対策（今回の実装で織り込む/織り込まない）
+## 10. 不要ファイル/処理の洗い出し → 削除の手順（確定プロセス）
 
-### 想定課題
+> 「comparison など大量に不要があるはず」を **主観ではなく機械的に確定**する
 
-* ClearMLプロジェクト/データセットが増えすぎる
-  → **run_idタグ + 命名規約**が最低限の防波堤
-* 同じデータの重複登録
-  → registration/editing は hash tag を利用済み。preprocessing も可能なら hash（入力dataset_id + preprocess設定）で再利用設計を検討
-* PipelineController 環境差（GPU無しで ResourceMonitor がうるさい）
-  → 既存の `disable_resource_monitoring` の運用を継続
-* 指標・可視化が増えて重い
-  → TopK制限、サンプリング（N行）、列数が多い場合の上位列だけ、を標準化
+### 10.1 “入口（エントリポイント）”を確定
 
-### 今回 “やらない” 対策（将来）
+* CLIコマンド一覧を固定（= public API）
+* Pipelineが呼ぶステップ一覧を固定（= public API）
 
-* 自動アーカイブ（古いタスクを自動で archive）
-  → 誤爆リスクがあるため、将来オプションで設計するなら `clearml.cleanup.*` として追加
+例（チェックコマンド）:
+
+```bash
+# CLIの入口（例）
+python -m automl_lib.cli.main --help
+
+# エントリポイントの参照箇所を抽出
+rg -n "cli|commands|run_pipeline|Pipeline|controller" automl_lib
+```
+
+### 10.2 未使用コード候補抽出（静的解析）
+
+```bash
+python -m pip install vulture ruff
+
+# 未使用関数/クラス候補（confidence高め）
+vulture automl_lib --min-confidence 80
+
+# import未使用/到達不能の粗取り
+ruff check automl_lib
+```
+
+### 10.3 実行トレース（動的解析）で“到達しない”を確定
+
+```bash
+python -m pip install coverage
+
+coverage run -m automl_lib.cli.commands.pipeline --config config/pipeline.yaml
+coverage html
+
+# coverage reportで 0% のファイル群を削除候補へ
+coverage report -m
+```
+
+### 10.4 削除のルール（破壊的変更を安全に）
+
+* **2段階削除**
+
+  1. Deprecated化（CLIから外す、importを切る、docsから消す）
+  2. 次のリリースで削除（テスト通過 + coverage 0% + 参照なし）
+* `docs/DEPRECATIONS.md` を作り、削除の理由・代替手段を残す
 
 ---
 
-## 6. Codexに渡す「実装順の最短ルート」
+## 11. 実装ステップ（優先順位つき）
 
-1. **RunContext（run_id）**を作る
-2. **命名/タグ**を preprocessing/training/comparison に適用
-3. **Hyperparameter sections** を導入（General 1枚を潰す）
-4. **Preprocessing 可視化**を追加（最もユーザー価値が高い）
-5. **Training child scalars** の規約を統一（比較しやすさの核心）
-6. **Comparison 俯瞰** を強化
-7. **Clone mode**（テンプレ複製）を入れて運用負荷を落とす
-8. 最後に docs/tests を固める
+### P0: “動く/見える/誤認しない”を最優先で修正（最短で効果が出る）
 
-> ※ Clone は早く入れたくなりますが、命名/タグ/sections が無い状態で clone を回すと “増殖が加速” します。
-> なので **「RunContext→命名/タグ→sections」→ clone** が安全です。
+* [ ] 全タスクで `reuse_last_task_id=False` を統一
+* [ ] 全タスクで `auto_connect_arg_parser=False` を統一（HyperParams汚染を止める）
+* [ ] HyperParametersは phase別の最小辞書のみ `connect`
+* [ ] 参照用の full config は Artifact化（`full_config.yaml`）
+* [ ] Training Summaryが **必ず** `leaderboard.csv` を出す（finallyでupload）
+
+### P1: “タスク独立性 + pipelineは接続だけ” をコード構造で固定
+
+* [ ] workflow層（processing）を “単独実行” できる形にする
+* [ ] pipelineは processing関数を順に呼ぶだけ（処理分岐をなくす）
+* [ ] train_parent は常に child task 生成 + 集計（standalone/pipeline差を消す）
+
+### P2: PLOTS整理（親は比較、子に詳細）
+
+* [ ] 親タスクから per-model SHAP/散布図/残差等を削除
+* [ ] 子タスクへ集約
+* [ ] plot title prefix（`01_...`）で順序保証
+
+### P3: データ契約（preprocess bundle / inverse transform）を固定
+
+* [ ] `PreprocessingBundle`（transform/inverse）をjoblibで保存
+* [ ] summary.md / recipe.json をカテゴリ別で生成
+* [ ] training/inference が bundle を読むだけで整合するよう統一
+
+### P4: ディレクトリ再編 + 不要コード削除
+
+* [ ] `core/ workflow/ integrations/ registry/` を導入
+* [ ] 旧パスは段階的に移行（import wrapperで壊さない）
+* [ ] vulture + coverage で削除確定 → 物理削除
+
+### P5: README刷新（ユーザー/開発者分離）
+
+* [ ] `README_user.md`: dataset_id→pipeline→model選定→推論の一本道
+* [ ] `README_dev.md`: 拡張ポイント、設計ルール、タスクI/O契約
 
 ---
 
-必要なら、この計画をそのまま `docs/IMPLEMENTATION_ROADMAP.md` として貼り付けられる体裁（章立て・チェックリスト）にしてあります。
-次のステップとしては、PR1（RunContext + 命名/タグ）の **具体的な差分設計（どの関数にどの引数を増やすか、どのタグをいつ付けるか）**まで落とした “Codex実装用のTODOリスト（ファイル別）” も作れますが、まずはこのロードマップを基準に進めるのが最短です。
+## 12. README草案（アウトライン）
+
+### 12.1 README_user.md（非MLユーザー向け）
+
+```md
+# AutoML on ClearML（ユーザーガイド）
+
+## 1. できること
+- dataset_id を入れて実行 → 複数モデル比較 → おすすめモデルを選択 → 推論
+
+## 2. 最短の使い方（3ステップ）
+1) ClearMLのDataset IDを用意
+2) pipeline.yaml に dataset_id を入れる
+3) run_pipeline を実行
+
+## 3. ClearMLでどこを見れば良いか
+- Training Summary の Plots: RecommendedModel / Leaderboard
+- Configuration: Trainingだけ（余計な設定は出ません）
+- Artifacts: leaderboard.csv から詳細確認
+- 推論は model_id をコピペして Inference を実行
+
+## 4. 推論モード
+- single / batch / optimize の違いと出力場所
+
+## 5. よくあるトラブル
+- pipelineが動かない（queue/agent）
+- taskが増えない（task reuse）
+```
+
+### 12.2 README_dev.md（開発者向け）
+
+```md
+# Developer Guide
+
+## 1. Architecture
+- core / workflow / integrations / registry
+
+## 2. Phase I/O Contract
+- Dataset contract（manifest, preprocessing bundle）
+- Training outputs（leaderboard, model registry）
+- Inference outputs（mode別 artifacts）
+
+## 3. Extension Points
+- Add model: registry/models.py
+- Add metric: registry/metrics.py
+- Add preprocessing: core/preprocessing or registry/preprocessors.py
+- Add plots: workflow/<phase>/visualization.py
+
+## 4. ClearML Logging Rules
+- Hyperparametersは最小
+- 参照情報は artifacts / user properties
+- 親は比較、子は詳細
+
+## 5. Testing
+- smoke tests
+- contract tests
+```
+
+---
+
+## 13. Doneの定義（受け入れ条件）
+
+* [ ] dataset_id だけで pipeline 実行 → ClearML上で Training Summary が必ず生成される
+* [ ] Training Summary の `HyperParameters` に **関係ない項目が出ない**
+* [ ] Training Summary の `Plots` が “モデル比較と推奨” だけでスッキリしている
+* [ ] 子タスクに SHAP/散布図/残差が集約され、探索可能
+* [ ] 推論は model_id 指定で single/batch/optimize が迷わず回り、Artifactsが用途通りに保存される
+* [ ] 前処理内容がカテゴリ別に確認でき、学習/推論で同じ情報が参照できる
+* [ ] 不要コードが vulture + coverage により削除確定され、リポジトリが簡素化されている
+
+---
+
+## References（ClearML仕様の根拠）
+
+* User Properties は後から編集でき、Configuration内で扱える ([ClearML][1])
+* `Task.init(..., auto_connect_arg_parser=...)` で argparse由来の自動ロギングを制御できる ([ClearML][2])
+* “main execution Task は1プロセスにつき1つ” の注意 ([ClearML][3])
+
+---
+
+
+[1]: https://clear.ml/docs/latest/docs/fundamentals/hyperparameters/?utm_source=chatgpt.com "Hyperparameters"
+[2]: https://clear.ml/docs/latest/docs/clearml_sdk/task_sdk/?utm_source=chatgpt.com "Task"
+[3]: https://clear.ml/docs/latest/docs/references/sdk/task/?utm_source=chatgpt.com "Task"
+
+
+
+推論タスクに関して以下の点を改良、拡張してください。
+推論タスクのConfigurationタブで以下を追加してください
+＃単一条件の場合：Hyperparametersの項目に入力条件を各変数ごとに表示
+＃Optimizeの場合：inference-summaryタスクのHyperparametersの項目に入力条件を各変数ごとの範囲や設定、最適化のアルゴリズム、目的（最大、最小など）
+
+推論タスクのPlotsタブで有用なグラフをいくつか追加してください。
+＃[共通]推論タスクの条件と推論結果をPlotsテーブルにまとめて表示
+＃[共通]推論タスク共有で、学習データの内装範囲に対して、推論条件がどのあたりにあるかを散布図グラフでわかるように。
+＃Optimizeの場合、inference-summaryタスクに目的（最大、最小など）に応じたTopKを条件と目的変数を表示。Loss historyプロット（縦軸は対数スケール）,contourプロット、並行座標プロット、Feature importanceプロット、contourプロットをグラフ表示
+＃Plotsのグラフはナンバリングして優先度ごとにわかりやすいように
+
+単一条件の推論の場合、inference-summaryタスクは生成しないようにしてください。
+Optimizeの場合親タスクをinference-summarタスク、子タスクを各条件に対応するタスクとして、Trainの子タスクと同じように"Prediction_runs"というディレクトリを作成し、その配下に子タスクを配置。子タスクの内容は単一条件の推論の内容と一致させるように
+
+Optimizeの場合のyaml例を新たに作成してください
+また上記の変更がユーザー視点での内容把握しやすい仕様、開発者視点で保守・拡張しやすいように注意して実装し、実装後残件、改良すべき点を表示してください
+
+
+＃preprocessed-datasetのデータセットタスクのCONFIGURATIONタブのHYPERPARAMETERSに今の表示情報に加えてyamlの前処理に関わる項目の変数と設定値を保存、ひょうじするようにしてください。以下は対象のyaml例です
+preprocessing：
+  numeric_imputation: ["mean"]
+  categorical_imputation: ["most_frequent"]
+  scaling: ["standard"]
+  categorical_encoding: ["onehot"]
+  polynomial_degree: false
+  target_standardize: true
+
+＃training-summaryタスクのCONFIGURATIONタブのHYPERPARAMETERSに今の表示情報に加えてyamlの学習に関わる項目の変数と設定値を保存、ひょうじするようにしてください。以下は対象のyaml例です
+models:
+  name: LinearRegression
+    params: {}
+  name: Ridge
+    params:
+      alpha: [0.1, 1.0]
+  name: RandomForest
+    params:
+      n_estimators: [50]
+      max_depth: [null]
+
+ensembles:
+  stacking:
+    enable: false
+    estimators: []
+    final_estimator: null
+  voting:
+    enable: false
+    estimators: []
+    voting: "hard"
+
+cross_validation:
+  n_folds: 5
+  shuffle: true
+  random_seed: 42
+
+evaluation:
+  regression_metrics: ["mae", "rmse", "r2"]
+  classification_metrics: ["accuracy", "f1_macro", "roc_auc_ovr"]
+  primary_metric: null
+
+optimization:
+  method: "grid"
+  n_iter: 100

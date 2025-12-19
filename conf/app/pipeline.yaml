@@ -1,0 +1,24 @@
+defaults:
+  - training@training: default
+  - preprocessing@preprocessing: default
+  - inference@inference: default
+  - data_registration@data_registration: default
+  - data_editing@data_editing: default
+  - _self_
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+
+# Pipeline wiring / convenience settings.
+pipeline:
+  mode: "clearml"               # clearml only (PipelineController)
+  # When true, write resolved phase configs under outputs/pipeline/<run_id>/configs/
+  persist_resolved_configs: true
+
+# Pipeline runner should always orchestrate via ClearML PipelineController by default.
+training:
+  clearml:
+    enable_pipeline: true

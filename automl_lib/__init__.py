@@ -61,4 +61,4 @@ def _suppress_noisy_warnings() -> None:
 _ensure_writable_cache_dirs()
 _suppress_noisy_warnings()
 
-__all__ = ["config", "clearml", "phases", "pipeline", "registry"]
+__all__ = ["config", "clearml", "pipeline", "registry", "workflow"]

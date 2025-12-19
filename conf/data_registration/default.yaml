@@ -1,0 +1,26 @@
+# Default DataRegistrationConfig (Hydra/OmegaConf)
+
+run:
+  id: null
+  dataset_key: null
+  user: null
+
+data:
+  csv_path: "data/example.csv"
+  dataset_id: null
+  target_column: null
+  feature_columns: null
+  problem_type: null
+  test_size: 0.0
+  random_seed: 42
+
+clearml:
+  enabled: true
+  project_name: "AutoML-with-ClearML"
+  dataset_project: "AutoML-datasets"
+  base_output_uri: null
+  queue: "default"
+  tags: ["automl", "data_registration"]
+  register_raw_dataset: true
+  run_tasks_locally: true
+

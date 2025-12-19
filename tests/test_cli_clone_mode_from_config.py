@@ -18,7 +18,10 @@ class TestCloneModeFromConfig(unittest.TestCase):
                 tags=["automl"],
             )
         )
-        with mock.patch("automl_lib.clearml.clone.clone_task", return_value=("t2", {"task_id": "t2"})) as mocked, mock.patch(
+        with mock.patch(
+            "automl_lib.integrations.clearml.clone.clone_task",
+            return_value=("t2", {"task_id": "t2"}),
+        ) as mocked, mock.patch(
             "automl_lib.cli.common.print_and_write_json"
         ) as pwj:
             ok = maybe_clone_from_config(cfg, phase="training", output_info=None)
@@ -44,7 +47,10 @@ class TestCloneModeFromConfig(unittest.TestCase):
                 tags=[],
             )
         )
-        with mock.patch("automl_lib.clearml.clone.clone_task", return_value=("t2", {"task_id": "t2"})) as mocked, mock.patch(
+        with mock.patch(
+            "automl_lib.integrations.clearml.clone.clone_task",
+            return_value=("t2", {"task_id": "t2"}),
+        ) as mocked, mock.patch(
             "automl_lib.cli.common.print_and_write_json"
         ):
             ok = maybe_clone_from_config(cfg, phase="training", output_info=None)
@@ -66,4 +72,3 @@ class TestCloneModeFromConfig(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             maybe_clone_from_config(cfg, phase="training", output_info=None)
-

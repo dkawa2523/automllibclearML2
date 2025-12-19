@@ -1,0 +1,11 @@
+defaults:
+  - training: default
+  - _self_
+
+# Keep working directory stable (Hydra default chdir breaks relative paths + ClearML artifacts).
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+

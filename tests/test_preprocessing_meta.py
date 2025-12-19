@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from automl_lib.phases.preprocessing.meta import build_preprocessing_metadata
+from automl_lib.workflow.preprocessing.meta import build_preprocessing_metadata
 
 
 class TestPreprocessingMeta(unittest.TestCase):
@@ -41,11 +41,12 @@ class TestPreprocessingMeta(unittest.TestCase):
             )
 
             artifacts = set(meta.get("artifacts") or [])
-            self.assertIn(str(out_dir / "schema_raw.json"), artifacts)
-            self.assertIn(str(out_dir / "preprocess_pipeline.json"), artifacts)
+            self.assertIn(str(out_dir / "schema.json"), artifacts)
+            self.assertIn(str(out_dir / "manifest.json"), artifacts)
+            self.assertIn(str(out_dir / "preprocessing" / "recipe.json"), artifacts)
+            self.assertIn(str(out_dir / "preprocessing" / "summary.md"), artifacts)
 
-            schema = json.loads((out_dir / "schema_raw.json").read_text(encoding="utf-8"))
+            schema = json.loads((out_dir / "schema.json").read_text(encoding="utf-8"))
             self.assertEqual(schema["run_id"], "20251213-153012-a1b2c3")
             self.assertEqual(schema["dataset_key"], "example")
             self.assertEqual(schema["target_column"], "target")
-

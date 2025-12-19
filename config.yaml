@@ -55,31 +55,110 @@ preprocessing:
 # MODEL SETTINGS
 # -----------------------------------------------------------------------------
 models:
-  # Simplified model list for quick local run
+  # All built-in models (see: automl_lib/registry/models.py)
+  # Note: Some models require optional packages (requirements-optional.txt).
   - name: LinearRegression
+    enable: true
     params: {}
 
   - name: Ridge
+    enable: true
     params:
       alpha: [0.1, 1.0]
 
+  - name: Lasso
+    enable: true
+    params: {}
+
+  - name: ElasticNet
+    enable: true
+    params: {}
+
+  - name: SVR
+    enable: true
+    params: {}
+
+  - name: KNeighbors
+    enable: true
+    params: {}
+
   - name: RandomForest
+    enable: true
     params:
       n_estimators: [50]
       max_depth: [null]
+
+  - name: ExtraTrees
+    enable: true
+    params: {}
+
+  - name: GradientBoosting
+    enable: true
+    params: {}
+
+  - name: GaussianProcess
+    enable: true
+    params: {}
+
+  - name: MLP
+    enable: true
+    params: {}
+
+  # Classification-only models (will be skipped automatically for regression)
+  - name: LogisticRegression
+    enable: true
+    params: {}
+
+  - name: SVC
+    enable: true
+    params: {}
+
+  # Optional third-party models
+  - name: LightGBM
+    enable: true
+    params: {}
+
+  - name: XGBoost
+    enable: true
+    params: {}
+
+  - name: CatBoost
+    enable: true
+    params: {}
+
+  - name: TabPFN
+    enable: true
+    params: {}
 
 # -----------------------------------------------------------------------------
 # ENSEMBLE SETTINGS
 # -----------------------------------------------------------------------------
 ensembles:
   stacking:
-    enable: false
-    estimators: []
+    # Recommended: stacking tends to be the most effective "simple ensemble"
+    # for tabular problems. Optional models are skipped automatically when the
+    # corresponding library is not installed.
+    enable: true
+    estimators:
+      - LightGBM
+      - XGBoost
+      - CatBoost
+      # Always-available fallbacks (scikit-learn)
+      - RandomForest
+      - ExtraTrees
+    # Keep null to auto-pick: regression=LinearRegression / classification=LogisticRegression
     final_estimator: null
 
   voting:
-    enable: false
-    estimators: []
+    # Recommended: enable as a lightweight baseline ensemble.
+    enable: true
+    estimators:
+      - LightGBM
+      - XGBoost
+      - CatBoost
+      - RandomForest
+      - ExtraTrees
+    # Use hard voting for maximum compatibility (soft requires predict_proba for all).
     voting: 'hard'
 
 # -----------------------------------------------------------------------------
@@ -136,7 +215,7 @@ optimization:
   # Choose 'grid', 'random' or 'bayesian' (requires Optuna).
   method: 'grid'
   # Number of iterations for random or bayesian search. Ignored for grid.
-  n_iter: 100
+  n_iter: 2
 
 # -----------------------------------------------------------------------------
 # INTERPRETATION SETTINGS
@@ -169,15 +248,10 @@ clearml:
   enable_inference: false
   enable_optimization: false
   enable_pipeline: true
-  # comparison_mode: disabled | embedded
-  # - embedded: training-summary に TopK/集計/ヒートマップ等を集約（推奨）
-  # - standalone 比較タスクは pipeline では作りません（必要なら run_comparison を手動実行）
-  comparison_mode: "embedded"
-  # training-summary へ転送する画像（none | best | all）
+  # training-summary の Plots に表示する「推奨モデル(best)のみ」の結果プロット（none | best。all は互換用で best 扱い）
   summary_plots: "best"
-  # 推奨モデルの選び方（auto | training | comparison）
+  # 推奨モデルの選び方（auto | training）
   recommendation_mode: "auto"
-  comparison_metrics: ["r2", "rmse", "mae"]
   # エージェントが無い環境でも失敗しないようローカル実行を優先
   run_tasks_locally: true
   run_pipeline_locally: true

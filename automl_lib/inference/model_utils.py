@@ -232,6 +232,7 @@ def _predict_with_model(pipeline: Any, inputs: pd.DataFrame) -> np.ndarray:
         else:
             raise
 
+    used_proba = False
     try:
         if hasattr(estimator, "predict_proba"):
             with warnings.catch_warnings():
@@ -243,9 +244,39 @@ def _predict_with_model(pipeline: Any, inputs: pd.DataFrame) -> np.ndarray:
                 probs = estimator.predict_proba(model_inputs)
             if isinstance(probs, np.ndarray) and probs.ndim == 2 and probs.shape[1] >= 2:
                 preds = probs[:, 1]
+                used_proba = True
     except Exception:
         pass
-    return np.asarray(preds)
+
+    preds_arr = np.asarray(preds)
+
+    # Optional: inverse-transform predictions using the preprocessing bundle contract.
+    # This supports models trained on transformed targets without TransformedTargetRegressor.
+    try:
+        if not used_proba and np.issubdtype(preds_arr.dtype, np.number) and isinstance(pipeline, SKPipeline):
+            pre = pipeline.named_steps.get("preprocessor")
+            model = pipeline.named_steps.get("model")
+            if (
+                pre is not None
+                and hasattr(pre, "inverse_transform_target")
+                and getattr(pre, "target_transformer", None) is not None
+            ):
+                is_ttr = False
+                try:
+                    from sklearn.compose import TransformedTargetRegressor  # type: ignore
+
+                    is_ttr = model is not None and isinstance(model, TransformedTargetRegressor)
+                except Exception:
+                    is_ttr = False
+                if not is_ttr and not hasattr(model, "predict_proba"):
+                    try:
+                        preds_arr = np.asarray(pre.inverse_transform_target(preds_arr))
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    return preds_arr
 
 
 def _shorten_label(label: str, used: Set[str], max_len: int = 15) -> str:

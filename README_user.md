@@ -5,6 +5,34 @@
 
 ---
 
+## 0. ClearMLで迷わない見方（最短導線）
+
+1. **Pipelineタスク（Controller）**を開き、`data.dataset_id` を入力して実行
+2. 生成された **Training Summary（親タスク / training-summary）** を開く
+3. 見る場所は固定（ここ以外は基本見ません）:
+   - `Configuration`:
+     - `Training`（学習の入力設定だけが出ます）
+       - Pipeline（PipelineController）経由で実行した場合、ClearMLの内部メタとして `kwargs` / `kwargs_artifacts` / `properties` が表示されますが、基本は編集不要です（編集するとpipeline/stepの挙動を壊す可能性があります）。
+     - `USER PROPERTIES`（検索/一覧化に使う要約: `recommended_model_id` など）
+     - `Configuration Objects`（参照用: `OmegaConf` / `ChildTasks` / `Dataset` / `Preprocessing`）
+   - `Plots`（上から順に見る）:
+     - `01_Recommended Model`（推奨モデルと `model_id`）
+     - `02_Leaderboard` / `03_Leaderboard Table`（モデル比較）
+     - `04_Tradeoff`（任意: 精度と学習時間などのトレードオフ）
+     - `05_Scatter Plot of Recommended Model`（推奨モデルの真値-予測）
+     - `06_Feature Importance from Recommended Model`
+     - `07_Interpolation space: ...`（推奨モデルのPCA）
+     - `08_SHAP values`
+   - `Artifacts`:
+     - `leaderboard.csv` / `results_summary.csv`（比較表）
+     - `recommended_model.csv` / `recommendation_rationale.{md,json}`（推奨理由）
+     - `error_models.json`（一部モデルが失敗した場合の理由）
+4. 推論は `recommended_model_id` を `inference_config.yaml` に入れて `run_inference` を実行
+
+補足:
+- summary は「推奨モデルの最小セット + 比較」に絞ります（全モデル分の重い可視化は出しません）。
+- `03_Leaderboard Table` のリンク列から、各モデルの子タスクへ遷移できます（詳細分析は子タスク側）。
+
 ## 1. 環境構築
 
 ### 前提
@@ -32,15 +60,15 @@ cp clearml.conf.example clearml.conf
 ## 2. 実行コマンド一覧
 
 ### 新CLI（automl_lib / フェーズ単独実行、ClearMLタスク再利用防止・設定バリデーション付き）
-- パイプライン（ClearML PipelineController優先、失敗時 in-process）  
+- パイプライン（ClearML PipelineController のみ。使えない場合はエラー）  
   `python -m automl_lib.cli.run_pipeline --config config.yaml --output-info outputs/pipeline_info.json`
-  - 明示的に in-process 実行する場合: `python -m automl_lib.cli.run_pipeline --config config.yaml --mode in_process`
   - 任意: pipeline 前段で `data_registration` / `data_editing` の設定YAMLを指定する場合:
     - `--datareg-config config_dataregit.yaml`
     - `--editing-config config_editing.yaml`
-  - 任意: pipeline の preprocessing / （embedded比較のランキング設定）の設定YAMLを指定する場合:
+  - 任意: pipeline の preprocessing 設定YAMLを指定する場合:
     - `--preproc-config config_preprocessing.yaml`
-    - `--comparison-config config_comparison.yaml`
+  - 任意: pipeline の inference 設定YAMLを指定する場合（`clearml.enable_inference: true` のとき）:
+    - `--inference-config inference_config.yaml`
 - データ登録のみ（重複チェック: CSVハッシュ）  
   `python -m automl_lib.cli.run_data_registration --config config_dataregit.yaml`
 - データ編集のみ（重複チェック: 編集後CSVハッシュ）  
@@ -49,15 +77,11 @@ cp clearml.conf.example clearml.conf
   `python -m automl_lib.cli.run_preprocessing --config config_preprocessing.yaml`
 - 学習フェーズのみ  
   `python -m automl_lib.cli.run_training --config config_training.yaml`
-- 比較フェーズのみ（各学習タスクIDの集計・Plotly可視化を実行）  
-  `python -m automl_lib.cli.run_comparison --config config_comparison.yaml --training-info training_info.json`
-  - 複数runを横断比較する場合（repeatable）:
-    - `--training-info outputs/run1/training_info.json --training-info outputs/run2/training_info.json`
 - 推論フェーズのみ  
   `python -m automl_lib.cli.run_inference --config inference_config.yaml`
 
 ※ 全CLIで実行前に pydantic による設定バリデーション、`CLEARML_TASK_ID` クリアを行い、毎回新規タスクを作成します（必要に応じて `--output-info` で結果JSONを保存可能）。  
-※ `config.yaml` を `run_preprocessing` / `run_comparison` に渡しても動作します（必要キーだけ抽出してバリデーションします）。
+※ `config.yaml` を `run_preprocessing` に渡しても動作します（必要キーだけ抽出してバリデーションします）。
 
 ---
 
@@ -80,33 +104,64 @@ cp clearml.conf.example clearml.conf
 | clearml | services_queue | パイプラインコントローラ用キュー（任意） |
 | clearml | enable_pipeline | PipelineControllerを使うか |
 | clearml | run_pipeline_locally | Trueならローカルでパイプライン実行 |
-| clearml | comparison_mode | 比較の集約方式（`disabled` / `embedded` 推奨。`standalone` 比較は `run_comparison` を手動実行） |
-| clearml | summary_plots | training-summary へ転送する画像（`none` / `best` / `all`） |
-| clearml | recommendation_mode | 推奨モデルの選び方（`auto` / `training` / `comparison`） |
+| clearml | summary_plots | training-summary の Plots に「推奨モデル(best)のみ」の結果（例: Pred vs True / PCA 等）を表示するか（`none|best`。`all` は互換用で best 扱い） |
+| clearml | recommendation_mode | 推奨モデルの選び方（`auto` / `training`） |
 | preprocessing | numeric_imputation / categorical_imputation / scaling / categorical_encoding | 前処理戦略 |
 | models | name / params | 使用モデル名とハイパラ（複数可） |
 | cross_validation | n_folds / shuffle / random_seed | CV設定 |
 | output | output_dir / save_models | 出力先とモデル保存可否 |
+
+### 利用できる学習モデル一覧（`models[].name`）
+`models[].name` は大小無視で、`-` / `_` / 空白も無視して解決されます（例: `RandomForest`, `random_forest`, `random-forest` は同じ扱い）。  
+また、追加インストールしたライブラリに応じて利用できるモデルが増えます（`pip install -r requirements-optional.txt`）。  
+（分類/回帰の自動判定は `data.problem_type` か、未指定の場合は目的変数から推定します。）
+
+この一覧は `automl_lib/registry/models.py` のデフォルト登録（＋ optional パッケージ検出）に対応しており、`config.yaml: models[].name` に指定できる「組み込みモデル」をそのまま列挙しています。  
+表形式データのAutoMLで実際に候補になりやすい主要ファミリー（線形/正則化、近傍、カーネル、木アンサンブル、確率モデル、ニューラル）を揃えつつ、表形式で強いことが多い GBDT 系（`LightGBM` / `XGBoost` / `CatBoost`）や、近年の深層学習系（`TabNet`）・事前学習系（`TabPFN`）も含みます。  
+※「ライブラリ更新目安」は、本リポジトリの `requirements.txt` / `requirements-optional.txt` に記載している最小バージョンが出た頃（目安）です（実際の環境はインストール版に依存します）。
+
+| モデル名（例） | 回帰/分類 | ライブラリ更新目安（最小要求） | 特徴 | メリット | デメリット | 使いどころ |
+|---|---|---|---|---|---|---|
+| `LinearRegression` | 回帰 | `scikit-learn>=1.3`（2023頃〜） | 線形（正則化なし） | 高速・基準値になりやすい | 非線形に弱い | まずベースライン |
+| `Ridge` | 回帰/分類 | `scikit-learn>=1.3`（2023頃〜） | 線形 + L2正則化 | 安定・多重共線性に強い | 強い非線形は表現しにくい | 高次元のベースライン |
+| `Lasso` | 回帰 | `scikit-learn>=1.3`（2023頃〜） | 線形 + L1正則化 | 特徴量選択（疎）になりやすい | 相関が強い特徴量が多いと不安定 | 特徴量を絞りたい |
+| `ElasticNet` | 回帰 | `scikit-learn>=1.3`（2023頃〜） | 線形 + L1/L2 | Lassoより安定しやすい | 正則化係数の調整が必要 | 相関あり + 特徴選択 |
+| `KNeighbors` (`KNN`) | 回帰/分類 | `scikit-learn>=1.3`（2023頃〜） | 近傍ベース | 学習が軽い・非線形に対応 | 推論が遅い/スケーリングに敏感 | 小規模・局所パターン |
+| `SVR` | 回帰 | `scikit-learn>=1.3`（2023頃〜） | カーネルSVR | 小〜中規模で強いことがある | 大規模で遅い/パラメータ感度 | 非線形・データ少なめ |
+| `RandomForest` | 回帰/分類 | `scikit-learn>=1.3`（2023頃〜） | 決定木のバギング | 頑健・扱いやすい | GBDT系より精度が伸びにくいことがある | まず堅い選択肢 |
+| `ExtraTrees` | 回帰/分類 | `scikit-learn>=1.3`（2023頃〜） | ランダム性を強めた木 | 高速・過学習しにくいことがある | 精度のブレ/モデルが大きくなりがち | 速さ重視の木モデル |
+| `GradientBoosting` | 回帰/分類 | `scikit-learn>=1.3`（2023頃〜） | sklearnのGBDT | 標準構成でRFより高精度になりやすい | 大規模だと遅い/機能は控えめ | 依存追加なしでGBDT |
+| `GaussianProcess` | 回帰/分類 | `scikit-learn>=1.3`（2023頃〜） | ガウス過程 | 不確かさ推定が可能 | 計算が重い（データ数に弱い） | 超小規模・検証用途 |
+| `MLP` | 回帰/分類 | `scikit-learn>=1.3`（2023頃〜） | sklearnのNN | 非線形表現が可能 | 収束やスケール調整が難しい | 木系が合わないとき |
+| `LogisticRegression` | 分類のみ | `scikit-learn>=1.3`（2023頃〜） | 線形分類 | 高速・解釈しやすい | 非線形境界に弱い | 分類のベースライン |
+| `SVC` (`SVM`) | 分類のみ | `scikit-learn>=1.3`（2023頃〜） | カーネルSVM | 小〜中規模で強いことがある | 大規模で遅い/スケーリングに敏感 | 高次元・小規模分類 |
+| `LightGBM`（要: `lightgbm`） | 回帰/分類 | `lightgbm>=4.0`（2023頃〜） | 高速GBDT | 定番・高精度になりやすい | パラメータが多い/過学習注意 | まず試す第一候補 |
+| `XGBoost`（要: `xgboost`） | 回帰/分類 | `xgboost>=2.0`（2023頃〜） | 堅牢GBDT | 実績が多く安定しやすい | 設定が多い/学習が重め | LightGBMと比較 |
+| `CatBoost`（要: `catboost`） | 回帰/分類 | `catboost>=1.2`（2023頃〜） | カテゴリに強いGBDT | カテゴリ列が多いと強いことがある | 学習が重め/依存追加 | カテゴリが多いデータ |
+| `TabNet`（要: `torch`, `pytorch-tabnet`） | 回帰/分類 | `torch>=2.0`（2023頃〜）+ `pytorch-tabnet>=4.1` | Deep tabular | 複雑な相互作用を捉えることがある | 学習が重い（GPU推奨） | 大きめデータで試す |
+| `TabPFN`（要: `tabpfn` + 学習済み重み） | 回帰/分類 | `tabpfn>=0.1`（2024頃〜） | 事前学習モデル | 小規模データで強いことがある | 重みファイルがないとスキップされる | データ少なめで試す |
 
 補足:
 
 - data_editing の出力は `outputs/data_editing/<run_id>`（デフォルト。`editing.output_dir`/`editing.output_filename` で変更可。`editing.output_path` 指定時はそちら優先）
 - preprocessing の出力は `outputs/preprocessing/<run_id>`（デフォルト）
 - training の出力は `outputs/train/<run_id>`（デフォルト）
-- `config_comparison.yaml` のランキング/複合スコアは `clearml.comparison_mode: embedded` の場合に training-summary の集約内容に反映されます（例: `primary_metric=composite_score`, `composite.weights`）
-- 互換維持のため `clearml.enable_comparison` / `clearml.embed_comparison_in_training_summary` も動作しますが、今後は `clearml.comparison_mode` を推奨します
 
 ### 推論用 inference_config.yaml（抜粋）
+optimize の設定例: `inference_config_optimize_example.yaml`
+
 | セクション | キー | 説明 |
 |------------|------|------|
-| model_dir | - | 学習済みモデルjoblibのディレクトリ |
-| models | name, enable, model_id | 使用モデル（model_id指定時はClearML InputModelからロード） |
+| model_id | - | 推論に使う ClearML Model ID（training-summary の `recommended_model_id`） |
+| model_name | - | 任意（ClearML上の表示用ラベル） |
 | clearml | enabled, project_name, task_name, queue | 推論タスク作成用のClearML設定 |
-| input | mode | `csv` または `params` (範囲探索/最適化) |
-| input | variables / params_path | paramsモード時の変数定義またはJSONパス |
-| search | method | grid/random/tpe/cmaes |
-| search | n_trials | 最適化試行数 |
-| search | goal | min/max |
+| input | mode | `single` / `batch` / `optimize` |
+| input | single / single_json | single の入力（inline dict またはJSON） |
+| input | csv_path / dataset_id | batch の入力（CSVパス or ClearML Dataset ID） |
+| input | variables / params_path | optimize の探索変数定義（inline list またはJSONパス） |
+| search | method | grid/random/tpe/cmaes（optimize のみ） |
+| search | n_trials | 最適化試行数（optimize のみ） |
+| search | goal | min/max（optimize のみ） |
 | output_dir | - | 推論結果の出力ディレクトリ |
 
 ### 設定パラメータ詳細（学習・推論共通でよく触る項目）
@@ -117,9 +172,9 @@ cp clearml.conf.example clearml.conf
 | models | name, enable, params | 1モデルにつき1エントリ。paramsはgrid/random/bayesianの探索空間 |
 | optimization | method, n_iter | `grid`=全探索、`random`/`bayesian`=Optuna系探索 |
 | evaluation | primary_metric | 最良モデルの決定指標。未指定時は regression=r2, classification=accuracy |
-| clearml | enable_pipeline / comparison_mode | PipelineControllerの有効化 + 比較集約（`embedded`/`disabled`。`standalone`比較は手動実行） |
+| clearml | enable_pipeline | PipelineControllerの有効化 |
 | clearml.agents | preprocessing/training/inference/pipeline | 各フェーズの実行キュー。未設定ならqueueを使用 |
-| inference.input | mode | `csv`=一括推論、`params`=範囲探索/最適化 |
+| inference.input | mode | `single`=単発、`batch`=一括、`optimize`=条件探索/最適化 |
 | inference.search | method/n_trials/goal | Optunaのサンプラーと目的方向 |
 
 ### フェーズ別 入出力/主要設定
@@ -127,9 +182,9 @@ cp clearml.conf.example clearml.conf
 |----------|--------|--------|--------------|
 | データ登録 | data.csv_path / data.dataset_id | raw_dataset_id (ClearML) | clearml.register_raw_dataset |
 | データ編集 | raw_dataset_id / CSV | edited_dataset_id / `outputs/data_editing/<run_id>/edited.csv` | editing.* |
-| 前処理 | data.dataset_id (既存Dataset) | preprocessed_dataset_id / preprocessed_features.csv | preprocessing.* |
+| 前処理 | data.dataset_id (既存Dataset) | preprocessed_dataset_id / `outputs/preprocessing/<run_id>/dataset/data_processed.csv` | preprocessing.* |
 | 学習 | preprocessed_dataset_id or CSV | models/*.joblib, metrics/results_summary.csv, training tasks | models, optimization, evaluation, output.* |
-| 推論 | model_dir or InputModel IDs | 予測CSV/Plotly/Artifacts | inference.input/search/output_dir |
+| 推論 | model_id（ClearML Model） | 予測結果/探索結果（Artifacts/Plots） | model_id, input, search, output_dir |
 | パイプライン | config.yaml | PipelineController task（ClearML） | clearml.enable_pipeline, clearml.run_pipeline_locally, clearml.services_queue |
 
 ---
@@ -139,11 +194,8 @@ cp clearml.conf.example clearml.conf
 ### 全体パイプライン（概要）
 ```mermaid
 flowchart LR
-    A[config.yaml 読込] --> B{clearml.enable_pipeline?}
-    B -- No --> C[in-process pipeline]
-    B -- Yes --> D[PipelineController]
-    C --> E{dataset_id ある?}
-    D --> E
+    A[config.yaml 読込] --> D[PipelineController]
+    D --> E{dataset_id ある?}
     E -- No & register_raw_dataset --> R[data_registration]
     R --> S[data_editing?]
     E -- Yes --> P[preprocessing]
@@ -189,20 +241,18 @@ flowchart TD
     C --> F[summary集計 (Plots/Artifacts/Debug Samples)]
 ```
 
-### 推論フェーズ（summary + child tasks）
+### 推論フェーズ（single/batch は単独、optimize は summary + Prediction_runs）
 ```mermaid
 flowchart TD
-    A[inference_config] --> B[ClearML Task: inference-summary]
-    B --> C{mode}
-    C -- csv --> D[子タスク inference-single]
-    C -- params/grid --> E[子タスク inference-grid]
-    C -- params/optuna --> F[子タスク inference-<method>]
-    D --> G[予測CSV/Plots/Artifacts]
-    E --> H[全組合せの表/可視化]
-    F --> I[最適化履歴/最適値]
-    G --> J[summaryへ集計]
-    H --> J
-    I --> J
+    A[inference_config] --> C{mode}
+    C -- single --> D[Task: infer single]
+    C -- batch --> E[Task: infer batch]
+    C -- optimize --> B[Task: inference-summary]
+    B --> P[Prediction_runs/*: 子タスク predict rank:* (all trials)]
+    D --> G[Artifacts: input.json/output.json]
+    E --> H[Artifacts: predictions.csv]
+    B --> I[Artifacts: trials.csv/best_solution.json]
+    P --> G
 ```
 
 ### ClearML 上でのデータ/モデル受け渡し（IDの流れ）
@@ -227,13 +277,16 @@ flowchart LR
 - 親子タスク:
   - データ登録/編集/前処理/学習は順次親子リンクを設定（`AUTO_ML_PARENT_TASK_ID` or init_task）。
   - 学習では summary 親タスク + 各モデル子タスク（`<parent_project>/train_models`）。
-  - 推論では summary 親タスク + single/grid/optuna 子タスク。
+  - 推論では single/batch は単独タスク、optimize は summary 親タスク + Prediction_runs(全trial) 子タスク。
 - Dataset登録:
   - raw/edited/preprocessed で必要に応じて Dataset を作成し、次フェーズへ dataset_id を渡す。
 - モデル登録:
   - 学習フェーズで OutputModel として登録、推論では InputModel (model_id) を指定するとレジストリからロード。
 - training-summary の推奨モデル:
-  - `recommended_model.csv` と `recommendation_rationale.{md,json}` を出力し、ClearML の `01_overview/*` に表示します。
+  - `recommended_model.csv` と `recommendation_rationale.{md,json}` を出力し、ClearML の `Artifacts` から参照できます。
+  - `Configuration > USER PROPERTIES` に `recommended_model_id` を保存します（推論用にコピペ）。
+- 前処理の確認（長い1行のダンプを避ける）:
+  - 前処理Datasetに `preprocessing/summary.md`（カテゴリ別）を含め、training-summary 側でも `Configuration Objects > Preprocessing` と `Artifacts` に保存します。
 - キュー/サービスキュー:
   - `queue` で通常タスクの実行先、`services_queue` で PipelineController をサービスキューに乗せる設定が可能。
 - ログノイズ抑制:
@@ -253,10 +306,7 @@ clearml:
   services_queue: "services"
   enable_pipeline: true
   run_pipeline_locally: false
-  # comparison_mode: disabled | embedded
-  # - embedded: training-summary に TopK/集計/ヒートマップ等を集約（推奨）
-  # - standalone 比較タスクは pipeline では作りません（必要なら run_comparison を手動実行）
-  comparison_mode: "embedded"
+  # training-summary の Plots には「推奨モデル(best)のみ」の結果プロットだけを表示できます（none|best）
   summary_plots: "best"
   run_tasks_locally: false
   agents:
@@ -281,7 +331,7 @@ models:
 ---
 
 ## 7. トラブルシュート
-- タスクが再利用される/止まる: 各CLIで `CLEARML_TASK_ID` をクリア済みか確認。キューが存在するかも確認。
+- タスクが再利用される/止まる: 各CLIで `CLEARML_TASK_ID` をクリア済みか確認。キュー/Agentが存在するかも確認（remote pipeline は起動時に preflight でチェックします。必要なら `AUTO_ML_SKIP_CLEARML_QUEUE_CHECK=1`）。
 - PipelineControllerが出ない: `clearml.enable_pipeline: true` か、services_queue/queueが正しく設定されているか確認。ログの `[PipelineController]` 出力を参照。
 - Datasetが学習プロジェクトに紐づく: `clearml.dataset_project` を明示設定する。
 - ClearMLサーバ未接続: clearml.conf のURLとサーバ起動状態を確認（docker ps / curl http://localhost:8080 など）。
@@ -303,8 +353,7 @@ models:
 | データ編集 | raw_dataset_id or CSV | edited_dataset_id, Task | 列削除/置換/フィルタ等 | 新しい編集ルールを追加する場合は editing 設定と処理を拡張 |
 | 前処理 | edited_dataset_id or raw | preprocessed_dataset_id, Task | 特徴量型判定→前処理Pipeline生成→transform | 前処理ステップは registry 方式で追加/差し替えやすくする |
 | 学習 | preprocessed_dataset_id or CSV | training-summary Task + per-model Tasks + OutputModel/Artifacts | CV評価・メトリクス記録・モデル保存 | モデル/ハイパラは registry に追加。Plots/Artifactsは指定の形式に統一 |
-| 推論 | InputModel (model_id) or model_dir joblib | inference-summary Task + 子タスク (single/grid/optuna) | CSV/範囲探索/最適化 → 予測、最適値探索 | 新しい最適化アルゴリズムや指標を追加するときは inference の search 部分に拡張 |
-| 比較（手動） | 複数 training タスクID | comparison Task | 指標集計・ランキング・best抽出・可視化 | 横断比較（複数run）用途。pipelineでは不要 |
+| 推論 | model_id（ClearML Model） | single/batch: `infer <mode>`（単独） / optimize: inference-summary + Prediction_runs(全trial) | 単発/一括/最適化 → 予測/最適解 | 新しい最適化アルゴリズムや指標を追加するときは inference の search 部分に拡張 |
 | パイプライン | config.yaml | Pipeline Controller Task | 各フェーズをキュー実行 | 新フェーズ追加時は PipelineController にステップを追加 |
 
 ### Pipeline／設定変数（表）
@@ -318,13 +367,12 @@ models:
 | clearml | services_queue | Pipeline Controller用キュー |
 | clearml | enable_pipeline | PipelineControllerを使うか |
 | clearml | run_pipeline_locally | ローカルでパイプラインを動かすか |
-| clearml | comparison_mode | 比較の集約方式（`disabled`/`embedded`。`standalone`比較は手動run_comparison） |
-| clearml | summary_plots | training-summary へ転送する画像（none/best/all） |
+| clearml | summary_plots | training-summary の Plots に「推奨モデル(best)のみ」の結果（例: Pred vs True / PCA 等）を表示するか（`none|best`。`all` は互換用で best 扱い） |
 | clearml.agents | data_registration/data_editing/preprocessing/training/inference/pipeline | 各ステップの実行キュー（未設定なら clearml.queue） |
 | preprocessing | numeric_imputation / categorical_imputation / scaling / encoding | 前処理手法の選択 |
 | models | name / params | 使用するモデルとパラメータ |
 | cross_validation | n_folds / shuffle | CV設定 |
-| inference.input | mode (csv/params/optuna) | 推論モード |
+| inference.input | mode (single/batch/optimize) | 推論モード |
 | inference.search | method / n_trials / goal | 範囲探索・最適化のアルゴリズムと目的 |
 
 ---
@@ -367,29 +415,18 @@ flowchart TD
     C --> F[summary 集計 (Plots/Artifacts/Debug Samples)]
 ```
 
-### 推論（summary + child）
+### 推論（single/batch は単独、optimize は summary + Prediction_runs）
 ```mermaid
 flowchart TD
-    A[inference_config] --> B[Task: inference-summary]
-    B --> C{mode}
-    C -- csv --> D[inference-single]
-    C -- params/grid --> E[inference-grid]
-    C -- params/optuna --> F[inference-<method>]
-    D --> G[予測CSV/Plots]
-    E --> H[全組合せ表/可視化]
-    F --> I[最適化履歴/最適値]
-    G --> J[summary 集計]
-    H --> J
-    I --> J
-```
-
-### 比較
-```mermaid
-flowchart TD
-    A[trainingタスクID一覧] --> B[Task: comparison (manual)]
-    B --> C[各タスクのR2/MSE/RMSE収集]
-    C --> D[集計表/Plotlyで可視化]
-    D --> E[Artifacts: metrics_summary.csv]
+    A[inference_config] --> C{mode}
+    C -- single --> D[Task: infer single]
+    C -- batch --> E[Task: infer batch]
+    C -- optimize --> B[Task: inference-summary]
+    B --> P[Prediction_runs/*: 子タスク predict rank:* (all trials)]
+    D --> G[Artifacts: input/output]
+    E --> H[Artifacts: predictions.csv]
+    B --> I[Artifacts: trials.csv/best_solution.json]
+    P --> G
 ```
 
 ### パイプライン（Controller）
@@ -416,7 +453,7 @@ flowchart LR
 ```yaml
 preprocessing:
   # 独自Transformerを使う場合は plugins で import（import先で register_preprocessor() を呼ぶ）
-  # plugins: ["automl_lib.plugins.example_preprocessors"]
+  # plugins: ["your_project.automl_plugins.preprocessors"]
   numeric_pipeline_steps:
     - name: pca
       params:
@@ -429,7 +466,7 @@ preprocessing:
 ```yaml
 evaluation:
   # plugins で import（import先で register_metric() を呼ぶ）
-  # plugins: ["automl_lib.plugins.example_metrics"]
+  # plugins: ["your_project.automl_plugins.metrics"]
   regression_metrics: ["mae", "rmse", "r2", "mape", "smape"]
   classification_metrics: ["accuracy", "f1_macro", "roc_auc_ovr"]
 ```
@@ -441,9 +478,8 @@ evaluation:
 | モデルを追加/既存調整 | automl_lib/registry/models.py, config.yaml: models | 新モデル/エイリアス登録はここ（探索空間は config.yaml: models[].params） |
 | HPO戦略を追加 | automl_lib/training/search.py, config.yaml: optimization.method | Optunaサンプラを増やす場合は依存パッケージも追記 |
 | 指標を追加/変更 | automl_lib/registry/metrics.py, config.yaml: evaluation | `evaluation.plugins` で外部moduleから登録可（rmseはmse由来のderived指標） |
-| ClearML連携調整 | automl_lib/clearml/*, automl_lib/training/clearml_integration.py, config.yaml: clearml.* | Task/Queue/Agent/Dataset の指定をここで共通化 |
+| ClearML連携調整 | automl_lib/integrations/clearml/*, automl_lib/training/clearml_integration.py, config.yaml: clearml.* | Task/Queue/Agent/Dataset の指定をここで共通化 |
 | 推論挙動を拡張 | automl_lib/inference/*, inference_config.yaml | 入力モードや検索アルゴリズムを追加する場合はここを更新 |
-| 比較フェーズ拡張（任意） | automl_lib/phases/comparison/* | 複数run横断の集計や可視化を追加 |
 | 設定バリデーション | automl_lib/config/schemas.py, automl_lib/config/loaders.py | 不明キーはエラー（typo検知） |
 | ドキュメント更新 | README_user.md, README.md | コマンド例・Mermaid・設定表を同期する |
 
@@ -451,4 +487,3 @@ evaluation:
 - 小さなデータで `python -m automl_lib.cli.run_training --config config.yaml` を実行し、`outputs/train` に結果が出ることを確認
 - ClearMLなしで `clearml.enabled: false` にした時も通るかチェック
 - ClearMLありの場合は `CLEARML_TASK_ID` が毎回クリアされているかログを確認
-- 比較フェーズのみ動かす場合は `python -m automl_lib.cli.run_training --config config.yaml --output-info training_info.json` → `python -m automl_lib.cli.run_comparison --config config.yaml --training-info training_info.json` で確認

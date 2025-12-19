@@ -2,10 +2,13 @@ import os
 import unittest
 from unittest import mock
 
+# Unit tests must never require ClearML server connectivity (network is sandboxed).
+os.environ.setdefault("CLEARML_OFFLINE_MODE", "1")
+
 from automl_lib.cli.common import clearml_avoid_task_reuse
 from automl_lib.clearml.clone import clone_task
 from automl_lib.clearml.overrides import apply_overrides, get_task_overrides
-from automl_lib.clearml.utils import init_task
+from automl_lib.integrations.clearml.utils import init_task
 
 
 class TestCloneModeHelpers(unittest.TestCase):
@@ -53,11 +56,26 @@ class TestCloneModeHelpers(unittest.TestCase):
                 self.params[name] = value
 
         dummy = DummyTask()
+
+        class DummyTaskTypes:
+            training = "training"
+            custom = "custom"
+
+        class DummyTaskAPI:
+            @staticmethod
+            def current_task():
+                return dummy
+
+            @staticmethod
+            def init(*args, **kwargs):  # noqa: ANN002, ANN003
+                raise AssertionError("Task.init should not be called")
+
         old = os.environ.get("CLEARML_TASK_ID")
         try:
             os.environ["CLEARML_TASK_ID"] = "running-task"
-            with mock.patch("automl_lib.clearml.utils.Task.current_task", return_value=dummy), mock.patch(
-                "automl_lib.clearml.utils.Task.init", side_effect=AssertionError("Task.init should not be called")
+            with mock.patch(
+                "automl_lib.integrations.clearml.utils._import_clearml",
+                return_value=(DummyTaskAPI, DummyTaskTypes, None, None, None),
             ):
                 task = init_task(
                     project="proj",

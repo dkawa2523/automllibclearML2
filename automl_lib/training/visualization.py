@@ -14,7 +14,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover
+    import plotly.graph_objects as go  # type: ignore
 
 import matplotlib
 matplotlib.use("Agg")  # Use non‑interactive backend for file output
@@ -361,16 +364,57 @@ def build_plotly_interpolation_space(
     go, px = _maybe_import_plotly()
     if px is None:
         return None
+    X = features
+    y = np.asarray(targets)
+    if y.ndim != 1:
+        y = y.ravel()
+    if not np.issubdtype(y.dtype, np.number):
+        try:
+            y = pd.factorize(y)[0]
+        except Exception:
+            y = np.arange(len(y))
+
     try:
-        from sklearn.decomposition import PCA
+        import scipy.sparse as sp  # type: ignore
+
+        is_sparse = sp.issparse(X)  # type: ignore[attr-defined]
+    except Exception:
+        is_sparse = False
+
+    try:
+        n_rows = int(getattr(X, "shape", [0, 0])[0])
+        n_cols = int(getattr(X, "shape", [0, 0])[1])
+    except Exception:
+        n_rows, n_cols = 0, 0
+    if n_rows < 2 or n_cols < 1:
+        return None
+
+    max_samples = 2000
+    if n_rows > max_samples:
+        try:
+            rng = np.random.default_rng(0)
+            idx = rng.choice(n_rows, size=max_samples, replace=False)
+            if is_sparse:
+                X = X[idx]
+            else:
+                X = np.asarray(X)[idx]
+            y = y[idx]
+            n_rows = max_samples
+        except Exception:
+            return None
+
+    n_components = 2 if n_cols >= 2 else 1
+    try:
+        if is_sparse:
+            from sklearn.decomposition import TruncatedSVD
+
+            comps = TruncatedSVD(n_components=n_components, random_state=0).fit_transform(X)
+        else:
+            from sklearn.decomposition import PCA
+
+            comps = PCA(n_components=n_components).fit_transform(np.asarray(X))
     except Exception:
         return None
-    X = np.asarray(features)
-    y = np.asarray(targets)
-    if X.ndim != 2 or X.shape[0] < 2:
-        return None
-    n_components = 2 if X.shape[1] >= 2 else 1
-    comps = PCA(n_components=n_components).fit_transform(X)
     if n_components == 1:
         fig = px.scatter(x=comps[:, 0], y=[0] * len(comps), color=y, labels={"x": "PC1"}, title=title, color_continuous_scale="Viridis")
     else:
@@ -529,16 +573,57 @@ def plot_interpolation_space(
     title: Optional[str] = None,
 ) -> None:
     """Project features to 2D (PCA) to visualise interpolation space."""
-
-    from sklearn.decomposition import PCA
-
-    X = np.asarray(features)
+    X = features
     y = np.asarray(targets)
-    if X.ndim != 2 or X.shape[0] < 2:
+    if y.ndim != 1:
+        y = y.ravel()
+    if not np.issubdtype(y.dtype, np.number):
+        try:
+            y = pd.factorize(y)[0]
+        except Exception:
+            y = np.arange(len(y))
+
+    try:
+        import scipy.sparse as sp  # type: ignore
+
+        is_sparse = sp.issparse(X)  # type: ignore[attr-defined]
+    except Exception:
+        is_sparse = False
+
+    try:
+        n_rows = int(getattr(X, "shape", [0, 0])[0])
+        n_cols = int(getattr(X, "shape", [0, 0])[1])
+    except Exception:
+        n_rows, n_cols = 0, 0
+    if n_rows < 2 or n_cols < 1:
         return
-    n_components = 2 if X.shape[1] >= 2 else 1
-    pca = PCA(n_components=n_components)
-    comps = pca.fit_transform(X)
+
+    max_samples = 2000
+    if n_rows > max_samples:
+        try:
+            rng = np.random.default_rng(0)
+            idx = rng.choice(n_rows, size=max_samples, replace=False)
+            if is_sparse:
+                X = X[idx]
+            else:
+                X = np.asarray(X)[idx]
+            y = y[idx]
+            n_rows = max_samples
+        except Exception:
+            return
+
+    n_components = 2 if n_cols >= 2 else 1
+    try:
+        if is_sparse:
+            from sklearn.decomposition import TruncatedSVD
+
+            comps = TruncatedSVD(n_components=n_components, random_state=0).fit_transform(X)
+        else:
+            from sklearn.decomposition import PCA
+
+            comps = PCA(n_components=n_components).fit_transform(np.asarray(X))
+    except Exception:
+        return
     plt.figure(figsize=(6, 5))
     if n_components == 1:
         plt.scatter(comps[:, 0], [0] * len(comps), c=y, cmap="viridis", edgecolor="k", alpha=0.7)

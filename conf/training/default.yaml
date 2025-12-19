@@ -1,0 +1,186 @@
+# Default TrainingConfig (Hydra/OmegaConf)
+# - Standalone: `python -m automl_lib.cli.run_training_hydra`
+# - Pipeline: used from `conf/app/pipeline.yaml`
+
+run:
+  id: null
+  dataset_key: null
+  user: null
+
+data:
+  dataset_id: null
+  csv_path: "data/example.csv"
+  target_column: purchase_amount
+  feature_columns: null
+  problem_type: null
+  test_size: 0.0
+  random_seed: 42
+
+preprocessing:
+  numeric_imputation: ["mean"]
+  categorical_imputation: ["most_frequent"]
+  scaling: ["standard"]
+  categorical_encoding: ["onehot"]
+  polynomial_degree: false
+  target_standardize: true
+
+models:
+  # All built-in models (see: automl_lib/registry/models.py)
+  # Note: Some models require optional packages (requirements-optional.txt).
+  - name: LinearRegression
+    enable: true
+    params: {}
+
+  - name: Ridge
+    enable: true
+    params:
+      alpha: [0.1, 1.0]
+
+  - name: Lasso
+    enable: true
+    params: {}
+
+  - name: ElasticNet
+    enable: true
+    params: {}
+
+  - name: SVR
+    enable: true
+    params: {}
+
+  - name: KNeighbors
+    enable: true
+    params: {}
+
+  - name: RandomForest
+    enable: true
+    params: {}
+
+  - name: ExtraTrees
+    enable: true
+    params: {}
+
+  - name: GradientBoosting
+    enable: true
+    params: {}
+
+  - name: GaussianProcess
+    enable: true
+    params: {}
+
+  - name: MLP
+    enable: true
+    params: {}
+
+  # Classification-only models (will be skipped automatically for regression)
+  - name: LogisticRegression
+    enable: true
+    params: {}
+
+  - name: SVC
+    enable: true
+    params: {}
+
+  # Optional third-party models
+  - name: LightGBM
+    enable: false
+    params: {}
+
+  - name: XGBoost
+    enable: false
+    params: {}
+
+  - name: CatBoost
+    enable: false
+    params: {}
+
+  - name: TabNet
+    enable: false
+    params: {}
+
+  - name: TabPFN
+    enable: false
+    params: {}
+
+ensembles:
+  stacking:
+    # Recommended: stacking tends to be the most effective "simple ensemble"
+    # for tabular problems. Optional models are skipped automatically when the
+    # corresponding library is not installed.
+    enable: true
+    estimators:
+      - LightGBM
+      - XGBoost
+      - CatBoost
+      # Always-available fallbacks (scikit-learn)
+      - RandomForest
+      - ExtraTrees
+    # Keep null to auto-pick: regression=LinearRegression / classification=LogisticRegression
+    final_estimator: null
+  voting:
+    # Recommended: enable as a lightweight baseline ensemble.
+    enable: true
+    estimators:
+      - LightGBM
+      - XGBoost
+      - CatBoost
+      - RandomForest
+      - ExtraTrees
+    # Use hard voting for maximum compatibility (soft requires predict_proba for all).
+    voting: "hard"
+
+cross_validation:
+  n_folds: 5
+  shuffle: true
+  random_seed: 42
+
+output:
+  output_dir: "outputs/train"
+  save_models: true
+  generate_plots: true
+  results_csv: "results_summary.csv"
+
+evaluation:
+  regression_metrics: ["mae", "rmse", "r2"]
+  classification_metrics: ["accuracy", "f1_macro", "roc_auc_ovr"]
+  primary_metric: null
+
+optimization:
+  method: "grid"
+  n_iter: 100
+
+interpretation:
+  compute_feature_importance: true
+  compute_shap: true
+
+visualizations:
+  predicted_vs_actual: true
+  residual_scatter: false
+  residual_hist: false
+  feature_importance: false
+  shap_summary: false
+  comparative_heatmap: false
+
+clearml:
+  enabled: true
+  project_name: "AutoML-with-ClearML"
+  dataset_project: "AutoML-datasets"
+  base_output_uri: null
+  queue: "default"
+  services_queue: "services"
+  tags: ["automl"]
+  enable_preprocessing: true
+  enable_training: true
+  enable_inference: false
+  enable_optimization: false
+  enable_pipeline: false
+  run_tasks_locally: true
+  run_pipeline_locally: true
+  summary_plots: "best"
+  recommendation_mode: "auto"
+  agents:
+    preprocessing: null
+    training: null
+    inference: null
+    optimization: null
+    pipeline: null

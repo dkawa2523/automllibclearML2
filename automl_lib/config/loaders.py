@@ -4,7 +4,6 @@ from typing import Any, Dict
 import yaml  # type: ignore
 
 from .schemas import (
-    ComparisonConfig,
     DataEditingConfig,
     DataRegistrationConfig,
     InferenceConfig,
@@ -14,8 +13,17 @@ from .schemas import (
 
 
 def load_yaml(path: Path) -> Dict[str, Any]:
-    with path.open("r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+    # Prefer OmegaConf when available: supports interpolations, typed containers,
+    # and is the foundation for Hydra-based config composition.
+    try:  # pragma: no cover - optional dependency
+        from omegaconf import OmegaConf  # type: ignore
+
+        cfg = OmegaConf.load(str(path))
+        data = OmegaConf.to_container(cfg, resolve=True)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        with path.open("r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
 
 
 def load_training_config(path: Path) -> TrainingConfig:
@@ -79,24 +87,3 @@ def load_preprocessing_config(path: Path) -> PreprocessingConfig:
         "clearml": raw.get("clearml"),
     }
     return PreprocessingConfig.model_validate(slim)
-
-
-def load_comparison_config(path: Path) -> ComparisonConfig:
-    raw = load_yaml(path)
-    output = _extract_output_dir(raw) if not _looks_like_training_config(raw) else {}
-    ranking = raw.get("ranking")
-    if ranking is None and _looks_like_training_config(raw):
-        eval_raw = raw.get("evaluation")
-        if isinstance(eval_raw, dict):
-            primary = eval_raw.get("primary_metric")
-            if primary not in (None, "", "null", "none"):
-                ranking = {"primary_metric": primary}
-    if ranking is None:
-        ranking = {}
-    slim: Dict[str, Any] = {
-        "run": raw.get("run") or {},
-        "output": output,
-        "clearml": raw.get("clearml"),
-        "ranking": ranking,
-    }
-    return ComparisonConfig.model_validate(slim)

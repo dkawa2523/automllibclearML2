@@ -17,21 +17,20 @@ ClearML上での「見る場所」を固定した最短導線は `README_user.md
 
 ## セットアップ
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-# 任意（Optuna/SHAP/LightGBM/TabPFN など）
-pip install -r requirements-optional.txt
+```bat
+REM リポジトリ直下で実行（PowerShell の場合は先頭に .\ を付けます）
+install.bat --optional
+call .venv\Scripts\activate.bat
 ```
 
 ### ClearML 設定（任意）
 
 本リポジトリは、リポジトリルートの `clearml.conf` を優先して利用します。
 
-```bash
-cp clearml.conf.example clearml.conf
-# clearml.conf に URL / access_key / secret_key を設定
+```bat
+REM clearml.conf が無い場合は install.bat が clearml.conf.example から作成します
+copy clearml.conf.example clearml.conf
+REM clearml.conf に URL / access_key / secret_key を設定
 ```
 
 ---
@@ -42,30 +41,30 @@ cp clearml.conf.example clearml.conf
 
 Hydra 設定は `conf/` 配下にあり、CLI で上書きして実行できます（例: `data.dataset_id=...`）。
 
-```bash
-./.venv/bin/python -m automl_lib.cli.run_pipeline_hydra training.data.dataset_id=<CLEARML_DATASET_ID>
-./.venv/bin/python -m automl_lib.cli.run_training_hydra  data.dataset_id=<CLEARML_DATASET_ID>
-./.venv/bin/python -m automl_lib.cli.run_preprocessing_hydra data.dataset_id=<CLEARML_DATASET_ID>
-./.venv/bin/python -m automl_lib.cli.run_inference_hydra model_id=<CLEARML_MODEL_ID>
+```bat
+.venv\Scripts\python -m automl_lib.cli.run_pipeline_hydra training.data.dataset_id=<CLEARML_DATASET_ID>
+.venv\Scripts\python -m automl_lib.cli.run_training_hydra  data.dataset_id=<CLEARML_DATASET_ID>
+.venv\Scripts\python -m automl_lib.cli.run_preprocessing_hydra data.dataset_id=<CLEARML_DATASET_ID>
+.venv\Scripts\python -m automl_lib.cli.run_inference_hydra model_id=<CLEARML_MODEL_ID>
 ```
 
 ### パイプライン（推奨）
 
-```bash
-./.venv/bin/python -m automl_lib.cli.run_pipeline --config config.yaml
+```bat
+.venv\Scripts\python -m automl_lib.cli.run_pipeline --config config.yaml
 ```
 
 ### フェーズ単独実行
 
-```bash
-./.venv/bin/python -m automl_lib.cli.run_preprocessing --config config_preprocessing.yaml
-./.venv/bin/python -m automl_lib.cli.run_training       --config config_training.yaml
+```bat
+.venv\Scripts\python -m automl_lib.cli.run_preprocessing --config config_preprocessing.yaml
+.venv\Scripts\python -m automl_lib.cli.run_training       --config config_training.yaml
 ```
 
 ### Clone実行（テンプレTask複製）
 
-```bash
-./.venv/bin/python -m automl_lib.cli.run_clone --task-id <TEMPLATE_TASK_ID> --queue default --overrides overrides.yaml
+```bat
+.venv\Scripts\python -m automl_lib.cli.run_clone --task-id <TEMPLATE_TASK_ID> --queue default --overrides overrides.yaml
 ```
 
 ### Clone実行（configで有効化）

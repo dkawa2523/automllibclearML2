@@ -72,15 +72,15 @@
 
 ## テスト
 
-- `./.venv/bin/python -m unittest discover -s tests -q`
+- `.venv\Scripts\python -m unittest discover -s tests -q`
 
 ## P0受け入れ確認（ClearML UI / training-summary）
 
 ClearML 上で「training-summary の Plots が常に 01–08 のみ」になっていることを機械的に確認するには、
 以下を実行します（ClearML サーバが必要 / `CLEARML_OFFLINE_MODE` は無効にする）。
 
-```bash
-./.venv/bin/python scripts/verify_clearml_training_summary_plots.py --config config.yaml
+```bat
+.venv\Scripts\python scripts\verify_clearml_training_summary_plots.py --config config.yaml
 ```
 
 このスクリプトは:
@@ -95,8 +95,8 @@ ClearML 上で「training-summary の Plots が常に 01–08 のみ」になっ
 ClearML 上で「pipeline 実行（enable_inference=true）時に inference の親子タスク / artifacts が仕様通り」であることは、
 以下を実行して機械的に確認できます（ClearML サーバが必要 / `CLEARML_OFFLINE_MODE` は無効にする）。
 
-```bash
-./.venv/bin/python scripts/verify_clearml_inference_pipeline.py --config config.yaml --inference-config inference_config.yaml
+```bat
+.venv\Scripts\python scripts\verify_clearml_inference_pipeline.py --config config.yaml --inference-config inference_config.yaml
 ```
 
 このスクリプトは:

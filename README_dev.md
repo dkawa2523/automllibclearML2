@@ -7,7 +7,7 @@
 
 ## 0. まず結論（開発者向けの運用最小セット）
 
-- 実行は基本 `./.venv/bin/python -m automl_lib.cli.<command>` を使う（環境によって `python` が無い前提のため）
+- 実行は基本 `.venv\Scripts\python -m automl_lib.cli.<command>` を使う（venv未有効化でも確実に同じPythonを使うため）
 - データは原則 ClearML Dataset ID を入力として使う（`data.dataset_id`）
 - 個別フェーズの I/O は `automl_lib/types/phase_io.py` の構造に合わせる
   - `DatasetInfo`（dataset/task/csv の受け渡し）
@@ -44,12 +44,10 @@ automl_lib/
 
 ### 2.1 Python / venv
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-# 任意（Optuna/SHAP/LightGBM/TabPFN など）
-pip install -r requirements-optional.txt
+```bat
+REM リポジトリ直下で実行（PowerShell の場合は先頭に .\ を付けます）
+install.bat --optional --dev
+call .venv\Scripts\activate.bat
 ```
 
 補足:
@@ -78,76 +76,57 @@ pip install -r requirements-optional.txt
 Hydra の設定は `conf/` 配下にあります。`run_*_hydra` は Hydra で compose した設定を
 解決済み YAML として保存してから既存の処理を呼び出します（挙動を変えずに設定管理だけ置き換える目的）。
 
-```bash
+```bat
 # 単独フェーズ（root keys で上書き）
-./.venv/bin/python -m automl_lib.cli.run_training_hydra data.dataset_id=<DATASET_ID>
-./.venv/bin/python -m automl_lib.cli.run_preprocessing_hydra data.dataset_id=<DATASET_ID>
-./.venv/bin/python -m automl_lib.cli.run_inference_hydra model_id=<MODEL_ID>
+.venv\Scripts\python -m automl_lib.cli.run_training_hydra data.dataset_id=<DATASET_ID>
+.venv\Scripts\python -m automl_lib.cli.run_preprocessing_hydra data.dataset_id=<DATASET_ID>
+.venv\Scripts\python -m automl_lib.cli.run_inference_hydra model_id=<MODEL_ID>
 
 # pipeline（phase prefix で上書き）
-./.venv/bin/python -m automl_lib.cli.run_pipeline_hydra training.data.dataset_id=<DATASET_ID>
+.venv\Scripts\python -m automl_lib.cli.run_pipeline_hydra training.data.dataset_id=<DATASET_ID>
 ```
 
 ClearML では各タスクの `Configuration Objects` に `OmegaConf` として保存されます（実行時の最終設定）。
 
 ### 3.1 フェーズ単独実行（推奨）
 
-```bash
+```bat
 # 1) data_registration（CSV -> ClearML Dataset）
-./.venv/bin/python -m automl_lib.cli.run_data_registration \
-  --config config_dataregit.yaml \
-  --output-info outputs/datareg_info.json
+.venv\Scripts\python -m automl_lib.cli.run_data_registration --config config_dataregit.yaml --output-info outputs\datareg_info.json
 
 # 2) data_editing（Dataset/CSV -> 編集 -> ClearML Dataset）
-./.venv/bin/python -m automl_lib.cli.run_data_editing \
-  --config config_editing.yaml \
-  --input-info outputs/datareg_info.json \
-  --output-info outputs/editing_info.json
+.venv\Scripts\python -m automl_lib.cli.run_data_editing --config config_editing.yaml --input-info outputs\datareg_info.json --output-info outputs\editing_info.json
 
 # 3) preprocessing（既存Dataset -> 前処理 -> ClearML Dataset）
-./.venv/bin/python -m automl_lib.cli.run_preprocessing \
-  --config config_preprocessing.yaml \
-  --output-info outputs/preprocessing_info.json
+.venv\Scripts\python -m automl_lib.cli.run_preprocessing --config config_preprocessing.yaml --output-info outputs\preprocessing_info.json
 
 # 4) training（Dataset/CSV -> 学習/探索 -> summary + child tasks）
-./.venv/bin/python -m automl_lib.cli.run_training \
-  --config config_training.yaml \
-  --input-info outputs/preprocessing_info.json \
-  --output-info outputs/training_info.json
+.venv\Scripts\python -m automl_lib.cli.run_training --config config_training.yaml --input-info outputs\preprocessing_info.json --output-info outputs\training_info.json
 
 # 5) inference（学習済みモデルで推論/探索）
-./.venv/bin/python -m automl_lib.cli.run_inference \
-  --config inference_config.yaml \
-  --output-info outputs/inference_info.json
+.venv\Scripts\python -m automl_lib.cli.run_inference --config inference_config.yaml --output-info outputs\inference_info.json
 ```
 
 `--input-info` / `--training-info` は JSON/YAML の両対応です（`automl_lib/cli/common.py`）。
 
 ### 3.2 pipeline 実行（ClearML PipelineController のみ）
 
-```bash
+```bat
 # ClearML PipelineController（ClearML無効の場合は失敗）
-./.venv/bin/python -m automl_lib.cli.run_pipeline --config config.yaml --mode clearml --output-info outputs/pipeline_clearml.json
+.venv\Scripts\python -m automl_lib.cli.run_pipeline --config config.yaml --mode clearml --output-info outputs\pipeline_clearml.json
 
 # 任意: pipeline 前段で data_registration / data_editing を走らせたい場合
 # - `--datareg-config` / `--editing-config` で専用YAMLを指定可能（省略時は `config_dataregit.yaml` / `config_editing.yaml` を自動検出）
 # - `--preproc-config` も指定可能（省略時は `config_preprocessing.yaml` を自動検出）
 # - `--inference-config` も指定可能（省略時は `inference_config.yaml` を自動検出、`clearml.enable_inference: true` のときのみ実行）
 # - dataset_id が無い場合でも、前段が有効なら dataset_id を生成して preprocessing に渡す
-./.venv/bin/python -m automl_lib.cli.run_pipeline \
-  --config config_from_csv.yaml \
-  --mode clearml \
-  --datareg-config config_dataregit.yaml \
-  --editing-config config_editing.yaml \
-  --preproc-config config_preprocessing.yaml \
-  --inference-config inference_config.yaml \
-  --output-info outputs/pipeline_from_csv.json
+.venv\Scripts\python -m automl_lib.cli.run_pipeline --config config_from_csv.yaml --mode clearml --datareg-config config_dataregit.yaml --editing-config config_editing.yaml --preproc-config config_preprocessing.yaml --inference-config inference_config.yaml --output-info outputs\pipeline_from_csv.json
 ```
 
 ### 3.3 テスト（最小単体テスト）
 
-```bash
-./.venv/bin/python -m unittest discover -s tests -v
+```bat
+.venv\Scripts\python -m unittest discover -s tests -v
 ```
 
 未使用コードの洗い出し/削除手順は `docs/CLEANUP.md` を参照してください。
@@ -155,14 +134,14 @@ ClearML では各タスクの `Configuration Objects` に `OmegaConf` として�
 
 ClearML 上の P0 受け入れ確認（training-summary の Plots が 01–08 のみ）:
 
-```bash
-./.venv/bin/python scripts/verify_clearml_training_summary_plots.py --config config.yaml
+```bat
+.venv\Scripts\python scripts\verify_clearml_training_summary_plots.py --config config.yaml
 ```
 
 ClearML 上の P0 受け入れ確認（enable_inference=true 時の inference 親子タスク/Artifacts）:
 
-```bash
-./.venv/bin/python scripts/verify_clearml_inference_pipeline.py --config config.yaml --inference-config inference_config.yaml
+```bat
+.venv\Scripts\python scripts\verify_clearml_inference_pipeline.py --config config.yaml --inference-config inference_config.yaml
 ```
 
 ---
@@ -664,8 +643,8 @@ automl_lib/workflow/<new_phase>/
 
 実行（最小）:
 
-```bash
-./.venv/bin/python -m unittest discover -s tests -q
+```bat
+.venv\Scripts\python -m unittest discover -s tests -q
 ```
 
 補足:

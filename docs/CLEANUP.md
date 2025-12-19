@@ -6,8 +6,8 @@
 
 vulture + coverage をまとめて実行し、レポートを生成します。
 
-```bash
-./.venv/bin/python scripts/unused_code_audit.py --out-dir outputs/cleanup
+```bat
+.venv\Scripts\python scripts\unused_code_audit.py --out-dir outputs\cleanup
 ```
 
 出力：
@@ -28,36 +28,34 @@ unit test だけだと通らない経路（CLI 実行・PipelineController の�
 - inference CLI（`model_path` で推論）
 - pipeline controller の組み立て（PipelineController は stub で置換し、実タスク実行はしない）
 
-```bash
-./.venv/bin/python scripts/unused_code_audit.py \
-  --out-dir outputs/cleanup \
-  --coverage-cmd "scripts/coverage_entrypoints_smoke.py"
+```bat
+.venv\Scripts\python scripts\unused_code_audit.py --out-dir outputs\cleanup --coverage-cmd "scripts\coverage_entrypoints_smoke.py"
 ```
 
 ## 1) ツール導入（dev）
 
-```bash
-./.venv/bin/python -m pip install -r requirements-dev.txt
+```bat
+.venv\Scripts\python -m pip install -r requirements-dev.txt
 ```
 
 ネットワーク制限などで `pip install` ができない場合は、まず静的 import グラフから「到達しないモジュール」を機械的に抽出できます（精度は vulture/coverage より落ちますが、最初の足がかりになります）。
 
-```bash
-./.venv/bin/python scripts/import_reachability.py --json outputs/import_reachability.json
+```bat
+.venv\Scripts\python scripts\import_reachability.py --json outputs\import_reachability.json
 ```
 
 ## 2) 静的解析（未使用候補の抽出）
 
-```bash
-./.venv/bin/vulture automl_lib --min-confidence 80
-./.venv/bin/ruff check automl_lib
+```bat
+.venv\Scripts\python -m vulture automl_lib --min-confidence 80
+.venv\Scripts\python -m ruff check automl_lib
 ```
 
 ## 3) 動的解析（実行トレースで到達しない箇所を確定）
 
-```bash
-./.venv/bin/python -m coverage run -m unittest discover -s tests -v
-./.venv/bin/python -m coverage report -m
+```bat
+.venv\Scripts\python -m coverage run -m unittest discover -s tests -v
+.venv\Scripts\python -m coverage report -m
 ```
 
 ## 4) 削除の進め方（安全策 / 2段階）

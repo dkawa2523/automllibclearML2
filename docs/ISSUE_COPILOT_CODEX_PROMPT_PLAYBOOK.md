@@ -164,9 +164,9 @@
 
 【検証（最低限）】
 - 実行したいコマンド:
-  - ./.venv/bin/python -m unittest discover -s tests -q
-  - ./.venv/bin/python scripts/verify_clearml_training_summary_plots.py --config config.yaml（ClearMLサーバがある場合）
-  - ./.venv/bin/python scripts/verify_clearml_inference_pipeline.py --config config.yaml --inference-config inference_config.yaml（ClearMLサーバがある場合）
+  - `.venv\Scripts\python -m unittest discover -s tests -q`
+  - （ClearMLサーバがある場合）`.venv\Scripts\python scripts\verify_clearml_training_summary_plots.py --config config.yaml`
+  - （ClearMLサーバがある場合）`.venv\Scripts\python scripts\verify_clearml_inference_pipeline.py --config config.yaml --inference-config inference_config.yaml`
 
 【提出物（作業完了条件）】
 - 変更ファイル一覧:
@@ -263,8 +263,8 @@
 4) training-summary の leaderboard に載ること（モデル名・主要指標・model_id）を確認
 5) config 例（yaml）を追加（既存の `config_training.yaml` の形式に合わせる）
 6) テスト/検証:
-   - `./.venv/bin/python -m unittest discover -s tests -q`
-   - （ClearMLサーバがある場合）`./.venv/bin/python scripts/verify_clearml_training_summary_plots.py --config config.yaml`
+   - `.venv\Scripts\python -m unittest discover -s tests -q`
+   - （ClearMLサーバがある場合）`.venv\Scripts\python scripts\verify_clearml_training_summary_plots.py --config config.yaml`
 
 提出物:
 - 変更ファイル一覧
@@ -320,7 +320,7 @@
 3) bundle/joblib と recipe/summary の整合を保つ（必要なら contract version を上げる方針を提案）
 4) ClearML HyperParameters に “ユーザーが編集する前処理項目だけ” を追加（Inputではなく Preprocessing section）
 5) テスト/検証:
-   - `./.venv/bin/python -m unittest discover -s tests -q`
+   - `.venv\Scripts\python -m unittest discover -s tests -q`
    - （契約にテストがある場合）対象テストを更新
 
 提出物:
@@ -349,7 +349,7 @@
 3) training-summary の leaderboard に表示されることを確認（列名、並び替え）
 4) config（yaml）で有効化できるようにする（evaluation.*）
 5) テスト/検証（最小）:
-   - `./.venv/bin/python -m unittest discover -s tests -q`
+   - `.venv\Scripts\python -m unittest discover -s tests -q`
 
 提出物:
 - metric の定義/意味（大きいほど良い or 小さいほど良い）
@@ -376,8 +376,8 @@
 3) verify script がある場合、期待に合わせて更新
 
 検証:
-- `./.venv/bin/python -m unittest discover -s tests -q`
-- （ClearMLサーバがある場合）`./.venv/bin/python scripts/verify_clearml_training_summary_plots.py --config config.yaml`
+- `.venv\Scripts\python -m unittest discover -s tests -q`
+- （ClearMLサーバがある場合）`.venv\Scripts\python scripts\verify_clearml_training_summary_plots.py --config config.yaml`
 ```
 
 #### 2.7 pipeline の step を追加/順序変更（後から編集しやすい形を壊さない）
@@ -438,7 +438,7 @@
 4) 回帰防止としてテスト or verify script の期待値を追加
 
 検証:
-- `./.venv/bin/python -m unittest discover -s tests -q`
+- `.venv\Scripts\python -m unittest discover -s tests -q`
 ```
 
 #### 2.10 未使用コードを削除（Deprecated → Remove の2段階を守る）

@@ -27,7 +27,7 @@
      - `leaderboard.csv` / `results_summary.csv`（比較表）
      - `recommended_model.csv` / `recommendation_rationale.{md,json}`（推奨理由）
      - `error_models.json`（一部モデルが失敗した場合の理由）
-4. 推論は `recommended_model_id` を `inference_config.yaml` に入れて `run_inference` を実行
+4. 推論は training-summary の `recommended_model_id` を `inference_config.yaml` の `model_id` に入れて `run_inference` を実行
 
 補足:
 - summary は「推奨モデルの最小セット + 比較」に絞ります（全モデル分の重い可視化は出しません）。
@@ -41,15 +41,19 @@
 - Docker/Colima を利用する場合はデーモンが起動していること
 
 ### セットアップ手順
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-# 任意（Optuna/SHAP/LightGBM/TabPFN など）
-pip install -r requirements-optional.txt
-# ClearML を使う場合は設定ファイルを用意
-cp clearml.conf.example clearml.conf
+#### Windows（cmd.exe）
+```bat
+REM リポジトリ直下で実行（PowerShell の場合は先頭に .\ を付けます）
+install.bat
+
+REM 任意: Optuna/SHAP/LightGBM/TabPFN なども入れる
+install.bat --optional
+
+REM venv 有効化（コマンド例はこれを前提）
+call .venv\Scripts\activate.bat
 ```
+- PowerShell の場合: `.\install.bat` / `.\.venv\Scripts\Activate.ps1`
+- ClearML を使う場合: `clearml.conf` を編集（未作成なら `install.bat` が `clearml.conf.example` から作成します）
 
 ### ClearML 設定の確認
 - `clearml.conf.example` を `clearml.conf` にコピーし、`web_server` / `api_server` / `files_server` と認証情報を設定
@@ -61,7 +65,7 @@ cp clearml.conf.example clearml.conf
 
 ### 新CLI（automl_lib / フェーズ単独実行、ClearMLタスク再利用防止・設定バリデーション付き）
 - パイプライン（ClearML PipelineController のみ。使えない場合はエラー）  
-  `python -m automl_lib.cli.run_pipeline --config config.yaml --output-info outputs/pipeline_info.json`
+  `python -m automl_lib.cli.run_pipeline --config config.yaml --output-info outputs\pipeline_info.json`
   - 任意: pipeline 前段で `data_registration` / `data_editing` の設定YAMLを指定する場合:
     - `--datareg-config config_dataregit.yaml`
     - `--editing-config config_editing.yaml`
@@ -113,7 +117,7 @@ cp clearml.conf.example clearml.conf
 
 ### 利用できる学習モデル一覧（`models[].name`）
 `models[].name` は大小無視で、`-` / `_` / 空白も無視して解決されます（例: `RandomForest`, `random_forest`, `random-forest` は同じ扱い）。  
-また、追加インストールしたライブラリに応じて利用できるモデルが増えます（`pip install -r requirements-optional.txt`）。  
+また、追加インストールしたライブラリに応じて利用できるモデルが増えます（推奨: `install.bat --optional`。手動なら `python -m pip install -r requirements-optional.txt`）。  
 （分類/回帰の自動判定は `data.problem_type` か、未指定の場合は目的変数から推定します。）
 
 この一覧は `automl_lib/registry/models.py` のデフォルト登録（＋ optional パッケージ検出）に対応しており、`config.yaml: models[].name` に指定できる「組み込みモデル」をそのまま列挙しています。  

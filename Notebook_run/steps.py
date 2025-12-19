@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import math
 from pathlib import Path
@@ -31,6 +32,51 @@ def _apply_default_if_unchanged(*, current: str, default_if_equals: str, new_def
     if not cur or cur == base:
         return str(new_default).strip()
     return cur
+
+
+def _read_recommended_model_csv(path: Path) -> Dict[str, Optional[str]]:
+    try:
+        with Path(path).open("r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            row = next(reader, None)
+    except Exception:
+        return {}
+    if not isinstance(row, dict):
+        return {}
+    model_id = str(row.get("model_id") or "").strip() or None
+    model_name = str(row.get("model") or "").strip() or None
+    task_id = str(row.get("task_id") or "").strip() or None
+    return {"model_id": model_id, "model_name": model_name, "task_id": task_id}
+
+
+def _resolve_recommended_model_from_outputs(
+    *,
+    training_output_dir: Path,
+    run_id: Optional[str],
+) -> Dict[str, Optional[str]]:
+    base = Path(training_output_dir)
+    candidates: list[Path] = []
+    if run_id:
+        candidates.append(base / str(run_id) / "recommended_model.csv")
+    candidates.append(base / "recommended_model.csv")
+    for p in candidates:
+        if not p.exists():
+            continue
+        rec = _read_recommended_model_csv(p)
+        if rec.get("model_id"):
+            rec["source_path"] = str(p)
+            return rec
+    try:
+        globbed = list(base.glob("*/recommended_model.csv"))
+        globbed.sort(key=lambda p: float(p.stat().st_mtime), reverse=True)
+        for p in globbed:
+            rec = _read_recommended_model_csv(p)
+            if rec.get("model_id"):
+                rec["source_path"] = str(p)
+                return rec
+    except Exception:
+        pass
+    return {}
 
 
 def data_registration(ctx: NotebookContext, *, yaml_text: str, base_config_path: Path = Path("config_dataregit.yaml")) -> Dict[str, Any]:
@@ -126,6 +172,18 @@ def pipeline_training(ctx: NotebookContext, *, yaml_text: str, base_config_path:
     training_summary_task_id = str(getattr(train_summary_task, "id", "") or "").strip() or None
     preprocessing_task_id = str(getattr(preproc_task, "id", "") or "").strip() or None
 
+    training_output_dir = str(((merged.get("output") or {}).get("output_dir") or "outputs/train")).strip()
+
+    # Fallback when ClearML task lookup fails: read local training artifacts.
+    if not recommended_model_id:
+        rec = _resolve_recommended_model_from_outputs(
+            training_output_dir=Path(training_output_dir),
+            run_id=run_id,
+        )
+        recommended_model_id = str(rec.get("model_id") or "").strip() or None
+        if not recommended_model_name:
+            recommended_model_name = str(rec.get("model_name") or "").strip() or None
+
     print("\n--- Preprocessing ---")
     print(f"preprocessing_task_id: {preprocessing_task_id}")
     print(f"preprocessing_task_link: {task_url(preprocessing_task_id)}")
@@ -141,8 +199,14 @@ def pipeline_training(ctx: NotebookContext, *, yaml_text: str, base_config_path:
 
     # Suggestion YAML for inference inputs (copy/paste friendly).
     target = str(((merged.get("data") or {}).get("target_column") or "target")).strip()
-    suggest_single: Dict[str, Any] = {"input": {"mode": "single", "single": {}}}
+    suggest_single: Dict[str, Any] = {
+        "model_id": str(recommended_model_id or ""),
+        "model_name": str(recommended_model_name or "best_model"),
+        "input": {"mode": "single", "single": {}},
+    }
     suggest_opt: Dict[str, Any] = {
+        "model_id": str(recommended_model_id or ""),
+        "model_name": str(recommended_model_name or "best_model"),
         "input": {"mode": "optimize", "variables": []},
         "search": {"method": "tpe", "n_trials": 10, "goal": "max"},
     }
@@ -272,6 +336,7 @@ def pipeline_training(ctx: NotebookContext, *, yaml_text: str, base_config_path:
                 "training_summary_task_id": training_summary_task_id,
                 "recommended_model_id": recommended_model_id,
                 "recommended_model_name": recommended_model_name,
+                "training_output_dir": training_output_dir,
                 "suggest_single_yaml": ctx.dump_yaml(suggest_single),
                 "suggest_optimize_yaml": ctx.dump_yaml(suggest_opt),
             }
@@ -293,14 +358,41 @@ def inference_single(ctx: NotebookContext, *, yaml_text: str, base_config_path: 
             "前処理+学習セルの出力 'suggest_single_yaml' をコピペして埋めてから実行してください。"
         )
 
-    # Default model_id from training recommended_model_id, but do not override user changes.
+    # Resolve default model_id from previous training (pipeline state or local artifacts).
     state = ctx.load_state()
-    rec_mid = str(((state.get("pipeline") or {}).get("recommended_model_id") or "")).strip() or None
-    base_mid = str(base_cfg.get("model_id") or "").strip()
-    cur_mid = str(patch.get("model_id") or "").strip()
-    patch["model_id"] = _apply_default_if_unchanged(current=cur_mid, default_if_equals=base_mid, new_default=rec_mid)
+    pipe_state = state.get("pipeline") or {}
+    rec_mid = str((pipe_state.get("recommended_model_id") or "")).strip() or None
+    rec_name = str((pipe_state.get("recommended_model_name") or "")).strip() or None
+    run_id = str((pipe_state.get("run_id") or "")).strip() or None
+    training_output_dir = str((pipe_state.get("training_output_dir") or "outputs/train")).strip()
+    if not rec_mid:
+        rec = _resolve_recommended_model_from_outputs(training_output_dir=Path(training_output_dir), run_id=run_id)
+        rec_mid = str(rec.get("model_id") or "").strip() or None
+        if not rec_name:
+            rec_name = str(rec.get("model_name") or "").strip() or None
+        if rec_mid:
+            ctx.update_state({"pipeline": {"recommended_model_id": rec_mid, "recommended_model_name": rec_name}})
+
+    # Backward compatible: accept recommended_model_id in edited YAML, but always write model_id.
+    if not str(patch.get("model_id") or "").strip() and str(patch.get("recommended_model_id") or "").strip():
+        patch["model_id"] = str(patch.get("recommended_model_id") or "").strip()
+    patch.pop("recommended_model_id", None)
+
+    user_model_id = str(patch.get("model_id") or "").strip() or None
+    chosen_model_id = user_model_id or rec_mid
+    if not chosen_model_id:
+        raise ValueError(
+            "model_id が空です。\n"
+            "- 先に pipeline_training を成功させて recommended_model_id を取得するか\n"
+            "- inference YAML に model_id（training-summary の USER PROPERTIES: recommended_model_id）を設定してください。"
+        )
+
+    patch["model_id"] = str(chosen_model_id)
+    if rec_name and not str(patch.get("model_name") or "").strip():
+        patch["model_name"] = rec_name
 
     merged = ctx.deep_update(base_cfg, patch)
+    merged.pop("recommended_model_id", None)
     out_cfg_path = ctx.write_yaml(ctx.config_out_dir / "inference_single.yaml", merged)
     print(f"[inference single] config saved: {out_cfg_path}")
 
@@ -346,14 +438,40 @@ def inference_optimize(ctx: NotebookContext, *, yaml_text: str, base_config_path
             "前処理+学習セルの出力 'suggest_optimize_yaml' をコピペして埋めてから実行してください。"
         )
 
-    # Default model_id from training recommended_model_id, but do not override user changes.
+    # Resolve default model_id from previous training (pipeline state or local artifacts).
     state = ctx.load_state()
-    rec_mid = str(((state.get("pipeline") or {}).get("recommended_model_id") or "")).strip() or None
-    base_mid = str(base_cfg.get("model_id") or "").strip()
-    cur_mid = str(patch.get("model_id") or "").strip()
-    patch["model_id"] = _apply_default_if_unchanged(current=cur_mid, default_if_equals=base_mid, new_default=rec_mid)
+    pipe_state = state.get("pipeline") or {}
+    rec_mid = str((pipe_state.get("recommended_model_id") or "")).strip() or None
+    rec_name = str((pipe_state.get("recommended_model_name") or "")).strip() or None
+    run_id = str((pipe_state.get("run_id") or "")).strip() or None
+    training_output_dir = str((pipe_state.get("training_output_dir") or "outputs/train")).strip()
+    if not rec_mid:
+        rec = _resolve_recommended_model_from_outputs(training_output_dir=Path(training_output_dir), run_id=run_id)
+        rec_mid = str(rec.get("model_id") or "").strip() or None
+        if not rec_name:
+            rec_name = str(rec.get("model_name") or "").strip() or None
+        if rec_mid:
+            ctx.update_state({"pipeline": {"recommended_model_id": rec_mid, "recommended_model_name": rec_name}})
+
+    # Backward compatible: accept recommended_model_id in edited YAML, but always write model_id.
+    if not str(patch.get("model_id") or "").strip() and str(patch.get("recommended_model_id") or "").strip():
+        patch["model_id"] = str(patch.get("recommended_model_id") or "").strip()
+    patch.pop("recommended_model_id", None)
+
+    user_model_id = str(patch.get("model_id") or "").strip() or None
+    chosen_model_id = user_model_id or rec_mid
+    if not chosen_model_id:
+        raise ValueError(
+            "model_id が空です。\n"
+            "- 先に pipeline_training を成功させて recommended_model_id を取得するか\n"
+            "- inference YAML に model_id（training-summary の USER PROPERTIES: recommended_model_id）を設定してください。"
+        )
+    patch["model_id"] = str(chosen_model_id)
+    if rec_name and not str(patch.get("model_name") or "").strip():
+        patch["model_name"] = rec_name
 
     merged = ctx.deep_update(base_cfg, patch)
+    merged.pop("recommended_model_id", None)
     out_cfg_path = ctx.write_yaml(ctx.config_out_dir / "inference_optimize.yaml", merged)
     print(f"[inference optimize] config saved: {out_cfg_path}")
 

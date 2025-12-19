@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -140,27 +141,118 @@ def pipeline_training(ctx: NotebookContext, *, yaml_text: str, base_config_path:
 
     # Suggestion YAML for inference inputs (copy/paste friendly).
     target = str(((merged.get("data") or {}).get("target_column") or "target")).strip()
-    suggest_single = {"input": {"mode": "single", "single": {}}}
-    suggest_opt = {"input": {"mode": "optimize", "variables": []}}
+    suggest_single: Dict[str, Any] = {"input": {"mode": "single", "single": {}}}
+    suggest_opt: Dict[str, Any] = {
+        "input": {"mode": "optimize", "variables": []},
+        "search": {"method": "tpe", "n_trials": 10, "goal": "max"},
+    }
+
+    def _to_builtin_number(value: Any) -> Any:
+        if value is None:
+            return None
+        try:
+            if hasattr(value, "item"):
+                value = value.item()
+        except Exception:
+            pass
+        if isinstance(value, bool):
+            return bool(value)
+        if isinstance(value, int):
+            return int(value)
+        if isinstance(value, float):
+            if math.isnan(value) or math.isinf(value):
+                return None
+            return float(value)
+        return value
+
+    def _nice_step(*, vtype: str, vmin: float, vmax: float) -> Any:
+        span = float(vmax) - float(vmin)
+        if not math.isfinite(span) or span <= 0:
+            return 1 if vtype == "int" else 1.0
+        if vtype == "int":
+            step = max(1, int(round(span / 10.0)))
+            return int(step)
+        step = span / 10.0
+        # Keep YAML readable (avoid long decimals).
+        step_rounded = round(step, 6)
+        return step_rounded if step_rounded > 0 else step
 
     try:
         from automl_lib.integrations.clearml import load_input_model
         from automl_lib.inference.model_utils import _get_required_feature_names
         import joblib  # type: ignore
 
+        req: list[str] = []
         if recommended_model_id:
             local_model = load_input_model(str(recommended_model_id))
             if local_model:
                 pipe = joblib.load(local_model)
-                req = _get_required_feature_names(pipe) or []
+                req = [str(c) for c in (_get_required_feature_names(pipe) or []) if str(c).strip()]
                 if target in req:
                     req = [c for c in req if c != target]
-                req = list(req)[:20]
-                suggest_single["input"]["single"] = {c: "" for c in req}
-                suggest_opt["input"]["variables"] = [
-                    {"name": c, "type": "float", "method": "range", "min": 0, "max": 1, "step": 0.1}
-                    for c in req[:2]
-                ]
+
+        # Prefer dataset-driven examples (continuous features only).
+        cfg_data = merged.get("data") or {}
+        feature_columns = cfg_data.get("feature_columns")
+        if not isinstance(feature_columns, list):
+            feature_columns = None
+        feature_columns = [str(c) for c in feature_columns] if feature_columns else None
+
+        state = ctx.load_state()
+        csv_path = (
+            str(((state.get("data_registration") or {}).get("csv_path") or "")).strip()
+            or str((cfg_data.get("csv_path") or "")).strip()
+            or None
+        )
+
+        stats: Dict[str, Dict[str, Any]] = {}
+        if csv_path and Path(csv_path).exists():
+            df = pd.read_csv(csv_path)
+            if feature_columns:
+                candidate_cols = [c for c in feature_columns if c in df.columns]
+            else:
+                candidate_cols = [c for c in df.columns if c != target]
+
+            # "連続値のみ" = numeric dtypes only (exclude categorical/object).
+            numeric_cols = [c for c in candidate_cols if pd.api.types.is_numeric_dtype(df[c])]
+            for col in numeric_cols:
+                s = pd.to_numeric(df[col], errors="coerce")
+                if not s.notna().any():
+                    continue
+                vmin = _to_builtin_number(s.min())
+                vmax = _to_builtin_number(s.max())
+                if vmin is None or vmax is None:
+                    continue
+                col_is_int = pd.api.types.is_integer_dtype(df[col])
+                stats[col] = {"min": vmin, "max": vmax, "type": "int" if col_is_int else "float"}
+
+        if stats:
+            ordered_cols = req[:] if req else list(stats.keys())
+            ordered_cols = [c for c in ordered_cols if c in stats]
+            suggest_single["input"]["single"] = {c: stats[c]["min"] for c in ordered_cols}
+            suggest_opt["input"]["variables"] = [
+                {
+                    "name": c,
+                    "type": stats[c]["type"],
+                    "method": "range",
+                    "min": stats[c]["min"],
+                    "max": stats[c]["max"],
+                    "step": _nice_step(
+                        vtype=str(stats[c]["type"]),
+                        vmin=float(stats[c]["min"]),
+                        vmax=float(stats[c]["max"]),
+                    ),
+                }
+                for c in ordered_cols
+            ]
+        elif req:
+            # Fallback: show required columns without stats (still better than empty).
+            req = list(req)[:20]
+            suggest_single["input"]["single"] = {c: "" for c in req}
+            suggest_opt["input"]["variables"] = [
+                {"name": c, "type": "float", "method": "range", "min": 0, "max": 1, "step": 0.1}
+                for c in req[:2]
+            ]
     except Exception:
         pass
 
@@ -336,4 +428,3 @@ def inference_optimize(ctx: NotebookContext, *, yaml_text: str, base_config_path
     )
     print(f"[inference optimize] state saved: {ctx.state_path}")
     return info
-
